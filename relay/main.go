@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -83,6 +86,14 @@ func (r *Relay) putManifest(w http.ResponseWriter, req *http.Request, hash strin
 		return
 	}
 
+	// Parse max retrievals (default 1 for backward compatibility)
+	maxRetrievals := 1
+	if hdr := req.Header.Get("X-Max-Retrievals"); hdr != "" {
+		if n, err := strconv.Atoi(hdr); err == nil && n > 0 {
+			maxRetrievals = n
+		}
+	}
+
 	tmpPath := manifestPath + ".tmp"
 	tmpFile, err := os.Create(tmpPath)
 	if err != nil {
@@ -111,11 +122,18 @@ func (r *Relay) putManifest(w http.ResponseWriter, req *http.Request, hash strin
 		return
 	}
 
-	log.Printf("Stored manifest %s (%d bytes)", hash[:min(12, len(hash))], written)
+	// Write retrieval counter file
+	counterPath := manifestPath + ".count"
+	os.WriteFile(counterPath, []byte(fmt.Sprintf("%d", maxRetrievals)), 0644)
+
+	log.Printf("Stored manifest %s (%d bytes, max_retrievals=%d)", hash[:min(12, len(hash))], written, maxRetrievals)
 	w.WriteHeader(http.StatusCreated)
 }
 
 func (r *Relay) getManifest(w http.ResponseWriter, req *http.Request, hash string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	manifestPath := r.manifestPath(hash)
 
 	data, err := os.ReadFile(manifestPath)
@@ -124,10 +142,26 @@ func (r *Relay) getManifest(w http.ResponseWriter, req *http.Request, hash strin
 		return
 	}
 
-	// One-time retrieval: delete after read
-	os.Remove(manifestPath)
+	// Check and decrement retrieval counter
+	counterPath := manifestPath + ".count"
+	remaining := 1
+	if counterData, err := os.ReadFile(counterPath); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(counterData))); err == nil {
+			remaining = n
+		}
+	}
 
-	log.Printf("Retrieved and deleted manifest %s (%d bytes)", hash[:min(12, len(hash))], len(data))
+	remaining--
+	if remaining <= 0 {
+		// Last retrieval: delete manifest and counter
+		os.Remove(manifestPath)
+		os.Remove(counterPath)
+		log.Printf("Retrieved and deleted manifest %s (%d bytes, final retrieval)", hash[:min(12, len(hash))], len(data))
+	} else {
+		// Write updated counter
+		os.WriteFile(counterPath, []byte(fmt.Sprintf("%d", remaining)), 0644)
+		log.Printf("Retrieved manifest %s (%d bytes, %d retrievals remaining)", hash[:min(12, len(hash))], len(data), remaining)
+	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(data)

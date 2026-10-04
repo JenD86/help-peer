@@ -39,7 +39,7 @@ cd client && cargo build --release
 **Option 1: Docker Compose (easiest)**
 ```bash
 docker compose up -d
-# Relay on :7000, storage node on :7001
+# Web UI on :8080, relay on :7000, storage node on :7001
 ```
 
 **Option 2: Docker (individual containers)**
@@ -121,6 +121,9 @@ helppeer send ./my-model --name "Llama-3-70B"
 helppeer receive 38-vortex-xenon --output ./received/
 ```
 
+**Web UI:**
+Open `http://localhost:8080` in your browser. Drag & drop files to send (encrypted in-browser), or enter a code to receive. Login with email for transfer history and multi-recipient notifications.
+
 ### Multiple Storage Nodes
 
 ```bash
@@ -157,7 +160,7 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 - **Zero-knowledge storage**: Storage nodes and relays never see plaintext or encryption keys
 - **Erasure coding**: 8 data + 4 parity shards — survives 4 node failures
 - **Safetensors validation**: Files ending in `.safetensors` are validated in-memory before writing to disk
-- **One-time manifest retrieval**: Relay deletes manifest after first download
+- **One-time manifest retrieval**: Relay deletes manifest after first download (configurable for multi-recipient via `X-Max-Retrievals` header)
 - **TTL expiry**: All shards auto-expire after 24 hours
 
 ## Configuration
@@ -168,6 +171,7 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 |---|---|---|
 | `RELAY_PORT` | `7000` | Listen port |
 | `RELAY_DIR` | `/tmp/helppeer-relay` | Data directory for manifests |
+| `RELAY_MAX_RETRIEVALS` | `1` | Default max retrievals per manifest (override via `X-Max-Retrievals` header) |
 
 ### Storage Node
 
@@ -199,6 +203,20 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 |---|---|---|
 | `HELPEER_RELAY_URL` | `http://127.0.0.1:7000` | Relay server URL |
 | `HELPEER_STORAGE_NODES` | `http://127.0.0.1:7001` | Comma-separated storage node URLs |
+
+### Web Backend
+
+| Env Var | Default | Description |
+|---|---|---|
+| `WEB_PORT` | `8080` | Listen port |
+| `RELAY_URL` | `http://127.0.0.1:7000` | Relay server URL |
+| `STORAGE_NODES` | `http://127.0.0.1:7001` | Comma-separated storage node URLs |
+| `WEB_DATA_DIR` | `/tmp/helppeer-web` | Data directory for user DB |
+| `SMTP_HOST` | — | SMTP server hostname (e.g. `smtp.gmail.com`) |
+| `SMTP_PORT` | — | SMTP port (`465` for TLS, `587` for STARTTLS) |
+| `SMTP_USER` | — | SMTP username (e.g. your Gmail address) |
+| `SMTP_PASS` | — | SMTP password (use an app password for Gmail) |
+| `SMTP_FROM` | `SMTP_USER` | From email address |
 
 ## Project Structure
 
@@ -240,6 +258,23 @@ help-peer/
 │   │   ├── config.py                          # Configuration & env vars
 │   │   └── cli.py                             # CLI entry point
 │   └── tests/test_sdk.py                      # 15 unit tests
+├── web/                                       # Web frontend + backend
+│   ├── Dockerfile                             # Multi-stage: Node + Go -> single container
+│   ├── backend/                               # Go web backend (serves API + static files)
+│   │   ├── go.mod
+│   │   ├── main.go                             # HTTP server, routes, static embedding
+│   │   ├── auth.go                             # Magic link auth, sessions
+│   │   ├── db.go                               # File-based store for users, sessions
+│   │   ├── upload.go                           # Erasure coding + shard upload
+│   │   ├── download.go                         # Shard download + reconstruction
+│   │   └── notify.go                           # SMTP email notifications
+│   └── frontend/                               # React frontend (Vite + Tailwind)
+│       ├── package.json
+│       ├── vite.config.ts
+│       └── src/
+│           ├── App.tsx                         # Router + layout
+│           ├── pages/                          # Landing, Login, Verify, Upload, Download, History
+│           └── lib/                            # crypto.ts (WebCrypto), api.ts (API client)
 └── README.md
 ```
 
@@ -274,6 +309,7 @@ diff -r /tmp/test-model /tmp/received-py
 - [x] BLAKE3 hash verification
 - [x] Python SDK (pip install helppeer)
 - [x] Rust CLI --json mode for agent integration
+- [x] Web frontend (React + Go, browser-side encryption, email notifications, multi-recipient)
 - [ ] DHT-based node discovery (Kademlia)
 - [ ] NAT traversal (UDP hole-punching)
 - [ ] QUIC transport
