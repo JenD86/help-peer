@@ -1,0 +1,24 @@
+# Build artifacts
+relay/relay-server
+storage-node/storage-node
+client/target/
+sdk/build/
+sdk/dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Data directories (runtime)
+/tmp/helppeer-*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+[package]
+name = "helppeer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes-gcm = "0.10"
+blake3 = "1.5"
+clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+rand = "0.8"
+reed-solomon-erasure = "6.0"
+reqwest = { version = "0.12", features = ["stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.0", features = ["full"] }
+hmac = "0.12"
+hkdf = "0.12"
