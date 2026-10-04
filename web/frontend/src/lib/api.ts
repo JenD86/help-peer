@@ -1,149 +1,121 @@
 const API_BASE = ''
 
-export async function requestMagicLink(email: string): Promise<{ status: string; message: string }> {
-  const resp = await fetch(`${API_BASE}/api/auth/request`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email }),
-  })
-  return resp.json()
-}
-
-export async function verifyMagicLink(token: string): Promise<{ status: string; email: string }> {
-  const resp = await fetch(`${API_BASE}/api/auth/verify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
-  })
-  return resp.json()
-}
-
-export async function checkAuth(): Promise<{ authenticated: boolean; email?: string }> {
-  const resp = await fetch(`${API_BASE}/api/auth/me`)
-  return resp.json()
-}
-
-export async function logout(): Promise<void> {
-  await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST' })
-}
-
-export interface UploadFile {
-  path: string
-  size: number
-  data: ArrayBuffer
-}
-
-export interface UploadResult {
-  transfer_name: string
-  files: number
-  total_bytes: number
-}
-
-export async function uploadTransfer(
-  transferName: string,
-  files: UploadFile[],
-  manifestHash: string,
-  manifestData: ArrayBuffer,
-  maxRetrievals: number,
-  onProgress?: (msg: string) => void
-): Promise<UploadResult> {
-  onProgress?.('Encrypting files...')
-
-  const uploadFiles = files.map(f => ({
-    path: f.path,
-    size: f.size,
-    segments: [{ id: 'seg_000000', encrypted_size: f.data.byteLength, encrypted_data: f.data }],
-  }))
-
-  onProgress?.('Uploading to storage nodes...')
-
-  const resp = await fetch(`${API_BASE}/api/upload`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      transfer_name: transferName,
-      files: uploadFiles,
-      manifest_hash: manifestHash,
-      manifest_data: arrayBufferToBase64(manifestData),
-      max_retrievals: maxRetrievals,
-    }),
-  })
-
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ error: 'upload failed' }))
-    throw new Error(err.error || 'upload failed')
-  }
-
-  return resp.json()
-}
-
-export async function downloadManifest(manifestHash: string): Promise<ArrayBuffer> {
-  const resp = await fetch(`${API_BASE}/api/download`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ manifest_hash: manifestHash }),
-  })
-
-  if (!resp.ok) throw new Error('manifest not found')
-
-  const data = await resp.json()
-  return base64ToArrayBuffer(data.manifest_data)
-}
-
 export interface ShardInfo {
   index: number
   hash: string
   node: string
 }
 
+// fetch wrapper that throws with the server's error message on non-2xx.
+async function request(path: string, init?: RequestInit): Promise<Response> {
+  const resp = await fetch(`${API_BASE}${path}`, init)
+  if (!resp.ok) {
+    let message = `request failed (${resp.status})`
+    try {
+      const body = await resp.json()
+      if (body.error) message = body.error
+    } catch {
+      // not JSON; keep the generic message
+    }
+    throw new Error(message)
+  }
+  return resp
+}
+
+function postJSON(path: string, body: unknown): Promise<Response> {
+  return request(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function requestMagicLink(email: string): Promise<{ status: string; message: string }> {
+  return (await postJSON('/api/auth/request', { email })).json()
+}
+
+export async function verifyMagicLink(token: string): Promise<{ status: string; email: string }> {
+  return (await postJSON('/api/auth/verify', { token })).json()
+}
+
+export async function checkAuth(): Promise<{ authenticated: boolean; email?: string }> {
+  return (await request('/api/auth/me')).json()
+}
+
+export async function logout(): Promise<void> {
+  await request('/api/auth/logout', { method: 'POST' })
+}
+
+// Upload one encrypted segment; the server erasure-codes it and stores the shards.
+export async function uploadSegment(encrypted: ArrayBuffer): Promise<{ encrypted_size: number; shards: ShardInfo[] }> {
+  const resp = await request('/api/upload/segment', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: encrypted,
+  })
+  return resp.json()
+}
+
+export async function uploadManifest(params: {
+  manifestHash: string
+  manifestData: ArrayBuffer
+  maxRetrievals: number
+  transferName: string
+  files: number
+  totalBytes: number
+}): Promise<{ transfer_id?: string }> {
+  const resp = await postJSON('/api/upload/manifest', {
+    manifest_hash: params.manifestHash,
+    manifest_data: arrayBufferToBase64(params.manifestData),
+    max_retrievals: params.maxRetrievals,
+    transfer_name: params.transferName,
+    files: params.files,
+    total_bytes: params.totalBytes,
+  })
+  return resp.json()
+}
+
+export async function downloadManifest(manifestHash: string): Promise<ArrayBuffer> {
+  const resp = await postJSON('/api/download', { manifest_hash: manifestHash })
+  const data = await resp.json()
+  return base64ToArrayBuffer(data.manifest_data)
+}
+
+// Fetch one segment, rebuilt from its shards by the server (still encrypted).
 export async function downloadSegment(
   shards: ShardInfo[],
+  encryptedSize: number,
   dataShards: number,
   parityShards: number
 ): Promise<ArrayBuffer> {
-  const resp = await fetch(`${API_BASE}/api/download/segment`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ shards, data_shards: dataShards, parity_shards: parityShards }),
+  const resp = await postJSON('/api/download/segment', {
+    shards,
+    encrypted_size: encryptedSize,
+    data_shards: dataShards,
+    parity_shards: parityShards,
   })
-
-  if (!resp.ok) throw new Error('segment download failed')
-
-  const data = await resp.json()
-  return base64ToArrayBuffer(data.encrypted_data)
+  return resp.arrayBuffer()
 }
 
 export async function notifyRecipients(
+  transferId: string,
   code: string,
-  transferName: string,
-  recipients: string[],
-  files: number,
-  totalBytes: number
+  recipients: string[]
 ): Promise<{ status: string; sent: number; errors?: string[] }> {
-  const resp = await fetch(`${API_BASE}/api/notify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      code,
-      transfer_name: transferName,
-      recipients,
-      files,
-      total_bytes: totalBytes,
-    }),
-  })
-  return resp.json()
+  return (await postJSON('/api/notify', { transfer_id: transferId, code, recipients })).json()
 }
 
 export async function getHistory(): Promise<{ transfers: any[] }> {
-  const resp = await fetch(`${API_BASE}/api/history`)
-  return resp.json()
+  return (await request('/api/history')).json()
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf)
   let binary = ''
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i])
+  // Convert in chunks: one String.fromCharCode call per byte is very slow
+  // for multi-megabyte manifests, and spreading everything at once overflows the stack.
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
   }
   return btoa(binary)
 }

@@ -6,20 +6,23 @@ Think "Wormhole meets BitTorrent, but the sender can leave."
 
 ## How It Works
 
-1. **Sender** runs `helppeer send ./my-model/` and gets a code like `38-vortex-xenon`
+1. **Sender** runs `helppeer send ./my-model/` and gets a code like `orbit-velvet-zoom-candle-harbor-ember`
 2. The files are encrypted (AES-256-GCM), split into 64MB segments, erasure-coded (8+4 Reed-Solomon), and the 12 shards per segment are uploaded to volunteer storage nodes
 3. The encrypted manifest is uploaded to a relay server
 4. **Sender can go offline**
-5. **Receiver** runs `helppeer receive 38-vortex-xenon` — the code derives the encryption keys, fetches the manifest from the relay, downloads shards from storage nodes, reconstructs, decrypts, and validates the files
-6. Shards auto-expire after 24 hours (TTL)
+5. **Receiver** runs `helppeer receive orbit-velvet-zoom-candle-harbor-ember` — the code derives the encryption keys, fetches the manifest from the relay, downloads shards from storage nodes (checking each against its BLAKE3 hash), reconstructs, decrypts, and verifies each file against the sender's BLAKE3 hash
+6. Shards and manifests auto-expire after 24 hours (TTL)
+
+The Rust CLI, Python SDK and web UI implement the same protocol, so a code from any one of them can be received with any other.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Go 1.18+ (for relay and storage node)
+- Go 1.18+ (for relay and storage node; 1.21+ for the web backend)
 - Rust 1.70+ (for Rust client)
 - Python 3.9+ (for Python SDK)
+- Node.js 20+ (to build the web frontend)
 
 ### Build
 
@@ -38,9 +41,12 @@ cd client && cargo build --release
 
 **Option 1: Docker Compose (easiest)**
 ```bash
+cp .env.example .env   # then fill in SMTP settings, or delete them for dev mode
 docker compose up -d
 # Web UI on :8080, relay on :7000, storage node on :7001
 ```
+
+Without SMTP settings the web backend runs in dev mode and logs login links and notification emails instead of sending them. For a public deployment set `WEB_BASE_URL` in `.env` to the URL users visit.
 
 **Option 2: Docker (individual containers)**
 ```bash
@@ -86,11 +92,14 @@ STORAGE_BACKEND=s3 S3_BUCKET=my-bucket S3_ACCESS_KEY=... S3_SECRET_KEY=... \
 ./client/target/release/helppeer send ./my-model/ --name "Llama-3-70B"
 
 # Receive with the code
-./client/target/release/helppeer receive 38-vortex-xenon --output ./received/
+./client/target/release/helppeer receive orbit-velvet-zoom-candle-harbor-ember --output ./received/
+
+# Send a single file
+./client/target/release/helppeer send ./model.safetensors
 
 # Machine-readable JSON output (for agents/scripts)
 ./client/target/release/helppeer --json send ./my-model/ --name "Llama-3-70B"
-./client/target/release/helppeer --json receive 38-vortex-xenon --output ./received/
+./client/target/release/helppeer --json receive orbit-velvet-zoom-candle-harbor-ember --output ./received/
 ```
 
 **Python SDK:**
@@ -102,11 +111,11 @@ code = helppeer.send("./my-model", name="Llama-3-70B")
 print(f"Transfer code: {code}")
 
 # Receive a transfer
-helppeer.receive("38-vortex-xenon", output_dir="./received")
+helppeer.receive("orbit-velvet-zoom-candle-harbor-ember", output_dir="./received")
 
 # Get structured result (for agents)
 result = helppeer.send("./my-model", name="Llama-3-70B", return_details=True)
-# {"code": "38-vortex-xenon", "transfer_name": "Llama-3-70B", "files": 4, "total_bytes": 1056}
+# {"code": "orbit-velvet-zoom-candle-harbor-ember", "transfer_name": "Llama-3-70B", "files": 4, "total_bytes": 1056}
 
 # Configure custom servers
 helppeer.configure(
@@ -118,11 +127,13 @@ helppeer.configure(
 **Python CLI** (installed via `pip install helppeer`):
 ```bash
 helppeer send ./my-model --name "Llama-3-70B"
-helppeer receive 38-vortex-xenon --output ./received/
+helppeer receive orbit-velvet-zoom-candle-harbor-ember --output ./received/
+helppeer --json receive orbit-velvet-zoom-candle-harbor-ember   # JSON output
+python -m helppeer --help                                       # also works
 ```
 
 **Web UI:**
-Open `http://localhost:8080` in your browser. Drag & drop files to send (encrypted in-browser), or enter a code to receive. Login with email for transfer history and multi-recipient notifications.
+Open `http://localhost:8080` in your browser. Drag & drop files to send, or enter a code to receive. Files are encrypted in the browser and uploaded 64MB at a time; the backend only ever sees ciphertext, which it erasure-codes and stores. In Chromium-based browsers, received files stream straight into a folder you pick; other browsers assemble each file in memory, so use the CLI for very large transfers there. Log in with email for transfer history and to email the code to recipients (the code then passes through the server and the recipients' mail providers).
 
 ### Multiple Storage Nodes
 
@@ -132,8 +143,10 @@ STORAGE_PORT=7001 STORAGE_DIR=/tmp/node1 ./storage-node/storage-node &
 STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 
 # Send using multiple nodes
-./client/target/release/helppeer send ./my-model/ --nodes http://127.0.0.1:7001,http://127.0.0.1:7002
+./client/target/release/helppeer send ./my-model/ --nodes http://127.0.0.1:7001,http://127.0.0.1:7002,http://127.0.0.1:7003
 ```
+
+Shards are assigned round-robin, so the number of nodes decides how many node failures a transfer survives: with 3+ nodes each holds at most 4 of a segment's 12 shards, so any one node can be lost; with 12+ nodes any four can. Clients warn when fewer than 3 nodes are configured.
 
 ## Architecture
 
@@ -151,17 +164,26 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 
 - **Relay Server** (Go): Stores encrypted manifests indexed by `BLAKE3(K_index)`. One-time retrieval. Never sees plaintext.
 - **Storage Node** (Go): Stores encrypted shards with TTL. Zero-knowledge — cannot decrypt shard contents.
-- **Client** (Rust): Handles PAKE key derivation, AES-256-GCM encryption, Reed-Solomon erasure coding (8+4), manifest building, upload/download, and file validation.
-- **Python SDK**: Pure Python implementation of the full protocol. `pip install helppeer` — zero external binaries required. Includes CLI, programmatic API, and agent-friendly structured output.
+- **Client** (Rust): Handles key derivation from the transfer code, AES-256-GCM encryption, Reed-Solomon erasure coding (8+4), manifest building, upload/download, and file validation.
+- **Python SDK**: Pure Python implementation of the full protocol (with numpy for fast erasure coding). `pip install helppeer` — zero external binaries required. Includes CLI, programmatic API, and agent-friendly structured output.
+- **Web** (React + Go): The browser derives keys and encrypts; the Go backend erasure-codes ciphertext, talks to the relay and storage nodes, and handles login and email notifications.
+
+`protocol/test-vectors.json` holds key-derivation and erasure-coding vectors that the Rust, Python and Go test suites all check, so the implementations can't drift apart.
 
 ## Security
 
 - **End-to-end encryption**: All data is encrypted with AES-256-GCM before leaving the sender's machine
+- **High-entropy transfer codes**: 6 words from the EFF long wordlist (~77 bits), drawn from the OS CSPRNG. Because sender and receiver are never online together there is no PAKE — the code is the key — so it must be long enough to resist offline guessing and relay enumeration
+- **Safe extraction**: receivers reject manifest paths that are absolute or contain `..`, so a sender cannot write outside the chosen output directory
 - **Zero-knowledge storage**: Storage nodes and relays never see plaintext or encryption keys
-- **Erasure coding**: 8 data + 4 parity shards — survives 4 node failures
-- **Safetensors validation**: Files ending in `.safetensors` are validated in-memory before writing to disk
-- **One-time manifest retrieval**: Relay deletes manifest after first download (configurable for multi-recipient via `X-Max-Retrievals` header)
-- **TTL expiry**: All shards auto-expire after 24 hours
+- **Integrity checks**: Storage nodes refuse shards whose content doesn't match their BLAKE3 name; receivers discard shards that fail their hash and rebuild from parity, then check every file against the sender's BLAKE3 hash
+- **Erasure coding**: 8 data + 4 parity shards — any 8 of 12 rebuild a segment (see [Multiple Storage Nodes](#multiple-storage-nodes) for what that means per node)
+- **Manifest validation**: Receivers check the manifest's sizes, indexes and paths before allocating or writing anything
+- **Safetensors validation**: The header of each `.safetensors` file is validated when its first segment arrives
+- **One-time manifest retrieval**: Relay deletes manifest after first download (configurable for multi-recipient via `X-Max-Retrievals` header). A download that fails partway can't be retried with the same code
+- **Rate limiting**: The relay and web backend throttle clients that make repeated failed manifest lookups (code guessing); the web backend also limits login and notification emails
+- **TTL expiry**: Shards and manifests auto-expire after 24 hours, including across restarts
+- **Web trust model**: The web backend serves the page that does the encryption, so web users trust the server operator not to tamper with it. The server never stores transfer codes
 
 ## Configuration
 
@@ -171,7 +193,10 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 |---|---|---|
 | `RELAY_PORT` | `7000` | Listen port |
 | `RELAY_DIR` | `/tmp/helppeer-relay` | Data directory for manifests |
-| `RELAY_MAX_RETRIEVALS` | `1` | Default max retrievals per manifest (override via `X-Max-Retrievals` header) |
+| `RELAY_MAX_RETRIEVALS` | `1` | Default max retrievals per manifest (override via `X-Max-Retrievals` header, max 1000) |
+| `RELAY_TTL` | `86400` (24h) | Manifest TTL in seconds |
+| `RELAY_MAX_MANIFEST_BYTES` | `33554432` (32MB) | Largest manifest accepted |
+| `RELAY_MISS_LIMIT` | `30` | Failed lookups allowed per client IP per minute before returning 429 |
 
 ### Storage Node
 
@@ -182,6 +207,7 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 | `STORAGE_DIR` | `/tmp/helppeer-storage` | Data directory for shards (disk backend) |
 | `STORAGE_CAPACITY` | `1073741824` (1GB) | Max storage capacity in bytes |
 | `STORAGE_TTL` | `86400` (24h) | Shard TTL in seconds |
+| `STORAGE_MAX_SHARD_BYTES` | `16777216` (16MB) | Largest shard accepted |
 | `S3_BUCKET` | — | S3 bucket name (s3 backend) |
 | `S3_REGION` | `us-east-1` | S3 region (s3 backend) |
 | `S3_ENDPOINT` | — | S3 endpoint URL for MinIO/R2/B2 (s3 backend) |
@@ -204,13 +230,18 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 | `HELPEER_RELAY_URL` | `http://127.0.0.1:7000` | Relay server URL |
 | `HELPEER_STORAGE_NODES` | `http://127.0.0.1:7001` | Comma-separated storage node URLs |
 
+The Python CLI takes the same `--relay`, `--nodes` and `--json` flags as the Rust CLI.
+
 ### Web Backend
 
 | Env Var | Default | Description |
 |---|---|---|
 | `WEB_PORT` | `8080` | Listen port |
 | `RELAY_URL` | `http://127.0.0.1:7000` | Relay server URL |
-| `STORAGE_NODES` | `http://127.0.0.1:7001` | Comma-separated storage node URLs |
+| `STORAGE_NODES` | `http://127.0.0.1:7001` | Comma-separated storage node URLs, as the backend reaches them |
+| `STORAGE_NODES_PUBLIC` | `STORAGE_NODES` | The same nodes (same order) as other clients reach them; written into manifests so CLI users can receive web transfers |
+| `WEB_TRUST_PROXY` | off | Set to `1` behind a reverse proxy so rate limits use `X-Forwarded-For`. Leave off otherwise, or clients can spoof their address |
+| `WEB_BASE_URL` | `http://localhost:{WEB_PORT}` | Public URL used in login emails. **Required when SMTP is configured** |
 | `WEB_DATA_DIR` | `/tmp/helppeer-web` | Data directory for user DB |
 | `SMTP_HOST` | — | SMTP server hostname (e.g. `smtp.gmail.com`) |
 | `SMTP_PORT` | — | SMTP port (`465` for TLS, `587` for STARTTLS) |
@@ -223,11 +254,15 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 ```
 help-peer/
 ├── architecture_guide_ai_model_adaptation.md  # Full architecture document
-├── protocol/SPEC.md                           # Wire protocol specification
+├── protocol/
+│   ├── SPEC.md                                # Wire protocol specification
+│   ├── test-vectors.json                      # Cross-implementation test vectors
+│   └── wordlist.txt                           # EFF long wordlist for transfer codes
 ├── docker-compose.yml                          # One-command local deployment
 ├── relay/                                     # Relay server (Go)
 │   ├── go.mod
 │   ├── main.go
+│   ├── main_test.go
 │   └── Dockerfile
 ├── storage-node/                              # Storage node (Go)
 │   ├── go.mod
@@ -235,12 +270,14 @@ help-peer/
 │   ├── store.go                               # ShardStore interface
 │   ├── disk_store.go                          # Local filesystem backend
 │   ├── s3_store.go                            # S3-compatible backend (S3, R2, MinIO, B2)
+│   ├── main_test.go
 │   └── Dockerfile
 ├── client/                                    # Client (Rust)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── main.rs                            # CLI entry point (--json mode)
-│       ├── crypto.rs                           # AES-GCM, HKDF, HMAC, BLAKE3
+│       ├── crypto.rs                          # AES-GCM, HKDF, BLAKE3
+│       ├── http.rs                            # Shared HTTP client with timeouts + retries
 │       ├── erasure.rs                         # Reed-Solomon erasure coding
 │       ├── manifest.rs                        # Multi-file manifest builder
 │       ├── upload.rs                          # Shard upload pipeline
@@ -251,13 +288,13 @@ help-peer/
 │   ├── src/helppeer/
 │   │   ├── __init__.py                        # Public API: send(), receive(), configure()
 │   │   ├── client.py                          # Upload/download pipelines
-│   │   ├── crypto.py                           # AES-GCM, HKDF, HMAC, BLAKE3
+│   │   ├── crypto.py                          # AES-GCM, HKDF, BLAKE3
 │   │   ├── erasure.py                         # Reed-Solomon erasure coding
 │   │   ├── manifest.py                        # Manifest builder & parser
 │   │   ├── validator.py                       # Safetensors & pluggable validators
 │   │   ├── config.py                          # Configuration & env vars
 │   │   └── cli.py                             # CLI entry point
-│   └── tests/test_sdk.py                      # 15 unit tests
+│   └── tests/test_sdk.py                      # Unit tests
 ├── web/                                       # Web frontend + backend
 │   ├── Dockerfile                             # Multi-stage: Node + Go -> single container
 │   ├── backend/                               # Go web backend (serves API + static files)
@@ -265,27 +302,34 @@ help-peer/
 │   │   ├── main.go                             # HTTP server, routes, static embedding
 │   │   ├── auth.go                             # Magic link auth, sessions
 │   │   ├── db.go                               # File-based store for users, sessions
-│   │   ├── upload.go                           # Erasure coding + shard upload
+│   │   ├── upload.go                           # Erasure coding + shard upload, manifest upload
 │   │   ├── download.go                         # Shard download + reconstruction
-│   │   └── notify.go                           # SMTP email notifications
+│   │   ├── notify.go                           # SMTP email notifications
+│   │   ├── ratelimit.go                        # Per-client rate limiting
+│   │   └── *_test.go
 │   └── frontend/                               # React frontend (Vite + Tailwind)
 │       ├── package.json
 │       ├── vite.config.ts
 │       └── src/
 │           ├── App.tsx                         # Router + layout
 │           ├── pages/                          # Landing, Login, Verify, Upload, Download, History
-│           └── lib/                            # crypto.ts (WebCrypto), api.ts (API client)
+│           └── lib/                            # crypto.ts (WebCrypto + BLAKE3), api.ts (API client)
 └── README.md
 ```
 
 ## Running Tests
 
 ```bash
-# Rust unit tests (15 tests)
+# Rust unit tests
 cd client && cargo test
 
-# Python SDK unit tests (15 tests)
+# Python SDK unit tests
 cd sdk && python -m pytest tests/ -v
+
+# Go tests (relay, storage node, web backend)
+(cd relay && go test ./...)
+(cd storage-node && go test ./...)
+(cd web/backend && go test ./...)
 
 # End-to-end test (Rust client)
 ./relay/relay-server &
@@ -302,7 +346,7 @@ diff -r /tmp/test-model /tmp/received-py
 ## Roadmap
 
 - [x] MVP: single relay, single storage node, HTTP transport
-- [x] AES-256-GCM encryption with PAKE key derivation
+- [x] AES-256-GCM encryption with code-based key derivation
 - [x] Reed-Solomon erasure coding (8+4)
 - [x] Safetensors validation
 - [x] Multi-file directory transfer
@@ -310,11 +354,12 @@ diff -r /tmp/test-model /tmp/received-py
 - [x] Python SDK (pip install helppeer)
 - [x] Rust CLI --json mode for agent integration
 - [x] Web frontend (React + Go, browser-side encryption, email notifications, multi-recipient)
+- [x] Cross-client compatibility (CLI, Python and web share codes, with shared test vectors)
 - [ ] DHT-based node discovery (Kademlia)
 - [ ] NAT traversal (UDP hole-punching)
 - [ ] QUIC transport
-- [ ] Resumable downloads (SQLite state tracking)
-- [ ] SPAKE2 proper key exchange (currently uses HKDF of code)
+- [ ] Resumable downloads (SQLite state tracking) — today a failed download consumes the one-time manifest
+- [ ] Slow KDF (Argon2id) on the transfer code for extra brute-force margin
 - [ ] Multiple relay federation
 - [ ] Node reputation system
 - [ ] Additional validators (ONNX, GGUF, Pickle)

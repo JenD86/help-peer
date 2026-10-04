@@ -1,125 +1,87 @@
 /**
  * Browser-side crypto for Help Peer.
- * Uses WebCrypto API for AES-256-GCM and HKDF.
- * Uses SHA-256 as content hash (BLAKE3 not available in WebCrypto; SHA-256 is fine for shard addressing).
+ * Implements the same scheme as the Rust CLI and Python SDK (protocol/SPEC.md),
+ * so codes work across all clients: HKDF-SHA256 and AES-256-GCM via WebCrypto,
+ * BLAKE3 via @noble/hashes.
  */
+import { blake3 } from '@noble/hashes/blake3'
+import wordlistText from './wordlist.txt?raw'
 
 const enc = new TextEncoder()
-const dec = new TextDecoder()
 
-// Code-based key derivation: simulates SPAKE2 -> HKDF
-// For the web version, we derive keys from the transfer code using PBKDF2 + HKDF
+// Canonicalize a typed-in code so "Apple Banana", " apple-banana " and
+// "APPLE-BANANA" all derive the same keys.
+export function normalizeCode(code: string): string {
+  return code.split(/[-\s]+/).filter(w => w.length > 0).map(w => w.toLowerCase()).join('-')
+}
+
+// K_data / K_index = HKDF-SHA256(ikm = code, no salt, info = label). There is
+// no PAKE: sender and receiver are never online together, so the code itself
+// is the shared secret.
 export async function deriveKeys(code: string): Promise<{ kData: ArrayBuffer; kIndex: ArrayBuffer }> {
-  // Derive a shared secret from the code using PBKDF2
-  const codeBytes = enc.encode(code)
-  const salt = enc.encode('help-peer-salt-v1')
-
-  const baseKey = await crypto.subtle.importKey('raw', codeBytes, 'PBKDF2', false, ['deriveBits'])
-  const sharedSecret = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
-    baseKey,
-    64 // 512 bits = 2 x 256-bit keys
-  )
-
-  // Split into two halves
-  const secretBytes = new Uint8Array(sharedSecret)
-  const half = secretBytes.length / 2
-
-  // K_data = HKDF(first half, "help-peer-data-key")
-  const kDataBase = await crypto.subtle.importKey('raw', secretBytes.slice(0, half), 'HKDF', false, ['deriveBits'])
-  const kData = await crypto.subtle.deriveBits(
-    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode('help-peer-data-key') },
-    kDataBase,
-    256
-  )
-
-  // K_index = HKDF(second half, "help-peer-index-key")
-  const kIndexBase = await crypto.subtle.importKey('raw', secretBytes.slice(half), 'HKDF', false, ['deriveBits'])
-  const kIndex = await crypto.subtle.deriveBits(
-    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode('help-peer-index-key') },
-    kIndexBase,
-    256
-  )
-
-  return { kData, kIndex }
+  const ikm = await crypto.subtle.importKey('raw', enc.encode(normalizeCode(code)), 'HKDF', false, ['deriveBits'])
+  const derive = (info: string) =>
+    crypto.subtle.deriveBits(
+      { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode(info) },
+      ikm,
+      256
+    )
+  return { kData: await derive('help-peer-data-key'), kIndex: await derive('help-peer-index-key') }
 }
 
-// Relay hash = SHA-256(K_index) hex-encoded
-export async function relayHash(kIndex: ArrayBuffer): Promise<string> {
-  const hash = await crypto.subtle.digest('SHA-256', kIndex)
-  return toHex(new Uint8Array(hash))
+// Relay hash = BLAKE3(K_index) hex-encoded
+export function relayHash(kIndex: ArrayBuffer): string {
+  return toHex(blake3(new Uint8Array(kIndex)))
 }
 
-// AES-256-GCM encrypt
+// AES-256-GCM encrypt. Returns nonce || ciphertext || tag.
 export async function encryptSegment(kData: ArrayBuffer, plaintext: ArrayBuffer): Promise<ArrayBuffer> {
   const key = await crypto.subtle.importKey('raw', kData, 'AES-GCM', false, ['encrypt'])
   const nonce = crypto.getRandomValues(new Uint8Array(12))
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: nonce },
-    key,
-    plaintext
-  )
-  // Prepend nonce: nonce || ciphertext
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, plaintext)
   const result = new Uint8Array(nonce.length + ciphertext.byteLength)
   result.set(nonce, 0)
   result.set(new Uint8Array(ciphertext), nonce.length)
   return result.buffer
 }
 
-// AES-256-GCM decrypt
+// AES-256-GCM decrypt of nonce || ciphertext || tag.
 export async function decryptSegment(kData: ArrayBuffer, data: ArrayBuffer): Promise<ArrayBuffer> {
   const key = await crypto.subtle.importKey('raw', kData, 'AES-GCM', false, ['decrypt'])
   const bytes = new Uint8Array(data)
-  const nonce = bytes.slice(0, 12)
-  const ciphertext = bytes.slice(12)
-  return crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce },
-    key,
-    ciphertext
-  )
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.slice(0, 12) }, key, bytes.slice(12))
 }
 
-// SHA-256 content hash for shard addressing
-export async function contentHash(data: ArrayBuffer): Promise<string> {
-  const hash = await crypto.subtle.digest('SHA-256', data)
-  return toHex(new Uint8Array(hash))
+// Incremental BLAKE3 for whole-file hashes.
+export function fileHasher() {
+  const h = blake3.create({})
+  return {
+    update: (chunk: ArrayBuffer) => h.update(new Uint8Array(chunk)),
+    hexdigest: () => toHex(h.digest()),
+  }
 }
 
-// Generate a transfer code: {number}-{word}-{word}
-const WORDS = [
-  'orbit', 'velvet', 'xenon', 'vortex', 'quartz', 'photon', 'nebula', 'copper',
-  'silver', 'cobalt', 'zephyr', 'aurora', 'crystal', 'onyx', 'amber', 'willow',
-  'maple', 'cedar', 'falcon', 'heron', 'otter', 'bison', 'lynx', 'moose',
-  'raven', 'swift', 'tiger', 'wolf', 'bear', 'dove', 'hawk', 'ibis',
-  'koala', 'lemur', 'panda', 'seal', 'vole', 'yak', 'zebra', 'dolphin',
-]
+// Number of words in a transfer code. Each word from the 7776-word EFF list
+// adds ~12.9 bits, so 6 words gives ~77 bits. The code is the only secret,
+// so it must resist offline brute force and enumeration of the relay.
+const CODE_WORDS = 6
+const WORDS = wordlistText.split('\n').filter(w => w.length > 0)
 
+// Uniform random index in [0, n) from the CSPRNG, using rejection sampling to avoid modulo bias
+function randomIndex(n: number): number {
+  const limit = Math.floor(0x100000000 / n) * n
+  const buf = new Uint32Array(1)
+  do {
+    crypto.getRandomValues(buf)
+  } while (buf[0] >= limit)
+  return buf[0] % n
+}
+
+// Generate a transfer code: word-word-word-word-word-word
 export function generateCode(): string {
-  const n = Math.floor(Math.random() * 99) + 1
-  const w1 = WORDS[Math.floor(Math.random() * WORDS.length)]
-  const w2 = WORDS[Math.floor(Math.random() * WORDS.length)]
-  return `${n}-${w1}-${w2}`
+  return Array.from({ length: CODE_WORDS }, () => WORDS[randomIndex(WORDS.length)]).join('-')
 }
 
-function toHex(bytes: Uint8Array): string {
+export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
-}
-
-// ArrayBuffer <-> Base64 for JSON transport
-export function bufToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf)
-  let binary = ''
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i])
-  }
-  return btoa(binary)
-}
-
-export function base64ToBuf(b64: string): ArrayBuffer {
-  const binary = atob(b64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i)
-  }
-  return bytes.buffer
 }

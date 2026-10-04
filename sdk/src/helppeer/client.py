@@ -1,18 +1,30 @@
 """Help Peer client — send and receive file transfers."""
+from __future__ import annotations
+
+import functools
 import os
-import random
-import requests
-from typing import Optional, Callable, List, Dict, Any
+import secrets
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Union
+
+import blake3
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .config import get_config
 from . import crypto
 from . import erasure
 from .manifest import (
-    Manifest, ManifestFile, ManifestSegment, ManifestShard,
-    build_manifest, read_file_segment,
+    Manifest, ManifestSegment, ManifestShard,
+    build_manifest, read_file_segment, safe_output_path,
 )
 from .validator import ValidatorRegistry
+
+# (connect, read) timeouts in seconds for every request.
+TIMEOUT = (10, 300)
 
 
 def send(
@@ -20,7 +32,7 @@ def send(
     name: str = "untitled-transfer",
     *,
     return_details: bool = False,
-) -> str | Dict[str, Any]:
+) -> Union[str, Dict[str, Any]]:
     """Send a file or directory. Returns the transfer code.
 
     Args:
@@ -29,23 +41,54 @@ def send(
         return_details: If True, return a dict with full transfer details.
 
     Returns:
-        Transfer code string (e.g., "38-vortex-xenon"), or a dict if return_details=True.
+        Transfer code string (e.g., "orbit-velvet-zoom-candle-harbor-ember"), or a dict if return_details=True.
     """
     config = get_config()
+    if not config.storage_nodes:
+        raise ValueError("no storage nodes configured")
+    total_shards = config.data_shards + config.parity_shards
+    _warn_if_too_few_nodes(len(config.storage_nodes), total_shards, config.parity_shards)
+
     code = _generate_code()
     k_data, k_index = crypto.derive_keys(code)
     r_hash = crypto.relay_hash(k_index)
 
-    if os.path.isfile(path):
-        # Single file: wrap in a temporary directory structure
-        manifest = _send_single_file(path, name, k_data, config)
-    else:
-        manifest = _send_directory(path, name, k_data, config)
+    manifest, base_dir = build_manifest(path, name, config.segment_size)
+    manifest.erasure_data_shards = config.data_shards
+    manifest.erasure_parity_shards = config.parity_shards
 
-    # Encrypt and upload manifest
-    manifest_json = manifest.to_json()
-    encrypted_manifest = crypto.encrypt_segment(k_data, manifest_json)
-    _upload_manifest(config.relay_url, r_hash, encrypted_manifest)
+    with _session() as session, ThreadPoolExecutor(max_workers=total_shards) as pool:
+        for f in manifest.files:
+            file_path = os.path.join(base_dir, *f.path.split("/"))
+            hasher = blake3.blake3()
+
+            for seg_idx, seg in enumerate(f.segments):
+                plaintext = read_file_segment(file_path, seg_idx, manifest.segment_size)
+                if len(plaintext) != seg.original_size:
+                    raise RuntimeError(f"{f.path} changed size while being sent")
+                hasher.update(plaintext)
+
+                encrypted = crypto.encrypt_segment(k_data, plaintext)
+                shards = erasure.encode_segment(
+                    encrypted, manifest.erasure_data_shards, manifest.erasure_parity_shards
+                )
+
+                # Upload the shards in parallel (round-robin node assignment)
+                futures = [
+                    pool.submit(
+                        _upload_shard, session, idx,
+                        config.storage_nodes[idx % len(config.storage_nodes)], shard,
+                    )
+                    for idx, shard in enumerate(shards)
+                ]
+                seg.shards = [fut.result() for fut in futures]
+                seg.encrypted_size = len(encrypted)
+
+            f.blake3 = hasher.hexdigest()
+
+        # Encrypt and upload manifest
+        encrypted_manifest = crypto.encrypt_segment(k_data, manifest.to_json())
+        _upload_manifest(session, config.relay_url, r_hash, encrypted_manifest)
 
     if return_details:
         return {
@@ -66,7 +109,7 @@ def receive(
     """Receive a transfer using a code.
 
     Args:
-        code: The transfer code (e.g., "38-vortex-xenon").
+        code: The transfer code (e.g., "orbit-velvet-zoom-candle-harbor-ember").
         output_dir: Directory to save received files.
         progress: Optional callback(file_path, segment_index, total_segments).
 
@@ -77,53 +120,61 @@ def receive(
     k_data, k_index = crypto.derive_keys(code)
     r_hash = crypto.relay_hash(k_index)
 
-    # Download encrypted manifest from relay
-    encrypted_manifest = _download_manifest(config.relay_url, r_hash)
-    manifest_json = crypto.decrypt_segment(k_data, encrypted_manifest)
-    manifest = Manifest.from_json(manifest_json)
+    with _session() as session:
+        # Download encrypted manifest from relay
+        encrypted_manifest = _download_manifest(session, config.relay_url, r_hash)
+        manifest = Manifest.from_json(crypto.decrypt_segment(k_data, encrypted_manifest))
+        manifest.validate()
+        total_shards = manifest.erasure_data_shards + manifest.erasure_parity_shards
 
-    # Pre-allocate files
-    os.makedirs(output_dir, exist_ok=True)
-    for f in manifest.files:
-        file_path = os.path.join(output_dir, f.path)
-        os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-        with open(file_path, "wb") as fh:
-            fh.truncate(f.size)
+        # Validate every path before touching the filesystem.
+        file_paths = {f.path: safe_output_path(output_dir, f.path) for f in manifest.files}
 
-    # Download and reconstruct each file
-    registry = ValidatorRegistry()
-    file_hashes = {}
+        # Pre-allocate files
+        os.makedirs(output_dir, exist_ok=True)
+        for f in manifest.files:
+            file_path = file_paths[f.path]
+            os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+            with open(file_path, "wb") as fh:
+                fh.truncate(f.size)
 
-    for f in manifest.files:
-        file_path = os.path.join(output_dir, f.path)
-        total_segments = len(f.segments)
+        # Download and reconstruct each file
+        registry = ValidatorRegistry()
+        file_hashes = {}
 
-        for seg_idx, segment in enumerate(f.segments):
-            # Download shards
-            shard_data = _download_shards(segment)
+        with ThreadPoolExecutor(max_workers=total_shards) as pool:
+            for f in manifest.files:
+                file_path = file_paths[f.path]
+                total_segments = len(f.segments)
 
-            # Reconstruct encrypted segment
-            encrypted = erasure.decode_segment(shard_data, segment.encrypted_size)
+                for seg_idx, segment in enumerate(f.segments):
+                    shard_data = _download_shards(
+                        session, pool, segment,
+                        manifest.erasure_data_shards, manifest.erasure_parity_shards,
+                    )
+                    encrypted = erasure.decode_segment(
+                        shard_data, segment.encrypted_size,
+                        manifest.erasure_data_shards, manifest.erasure_parity_shards,
+                    )
+                    plaintext = crypto.decrypt_segment(k_data, encrypted)
 
-            # Decrypt
-            plaintext = crypto.decrypt_segment(k_data, encrypted)
+                    if seg_idx == 0:
+                        registry.validator_for(f.path).validate_first_segment(plaintext)
 
-            # Validate first segment
-            if seg_idx == 0:
-                validator = registry.validator_for(f.path)
-                validator.validate_first_segment(plaintext)
+                    with open(file_path, "r+b") as fh:
+                        fh.seek(seg_idx * manifest.segment_size)
+                        fh.write(plaintext)
 
-            # Write to file at offset
-            offset = seg_idx * config.segment_size
-            with open(file_path, "r+b") as fh:
-                fh.seek(offset)
-                fh.write(plaintext)
+                    if progress:
+                        progress(f.path, seg_idx + 1, total_segments)
 
-            if progress:
-                progress(f.path, seg_idx + 1, total_segments)
-
-        # Compute file hash
-        file_hashes[f.path] = _compute_file_hash(file_path)
+                # Check the reassembled file against the sender's hash, when provided
+                file_hash = _compute_file_hash(file_path)
+                if f.blake3 is not None and file_hash != f.blake3:
+                    raise ValueError(
+                        f"{f.path} is corrupt: BLAKE3 {file_hash} does not match sender's {f.blake3}"
+                    )
+                file_hashes[f.path] = file_hash
 
     return {
         "transfer_name": manifest.transfer_name,
@@ -133,124 +184,110 @@ def receive(
     }
 
 
-def _send_directory(dir_path: str, name: str, k_data: bytes, config) -> Manifest:
-    """Send a directory."""
-    manifest = build_manifest(dir_path, name, config.segment_size)
-    manifest.erasure_data_shards = config.data_shards
-    manifest.erasure_parity_shards = config.parity_shards
-
-    for f in manifest.files:
-        file_path = os.path.join(dir_path, f.path)
-        for seg in f.segments:
-            seg_idx = int(seg.id.split("_")[1])
-            plaintext = read_file_segment(file_path, seg_idx, config.segment_size)
-            encrypted = crypto.encrypt_segment(k_data, plaintext)
-            shards = erasure.encode_segment(encrypted)
-
-            shard_infos = []
-            for shard_idx, shard in enumerate(shards):
-                h = crypto.content_hash(shard)
-                node = config.storage_nodes[shard_idx % len(config.storage_nodes)]
-                _upload_shard(node, h, shard)
-                shard_infos.append(ManifestShard(
-                    index=shard_idx, hash=h, node=node,
-                ))
-
-            seg.encrypted_size = len(encrypted)
-            seg.shards = shard_infos
-
-    return manifest
+def _session() -> requests.Session:
+    """A pooled session that retries transient failures (connection errors,
+    5xx, 429) with backoff."""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "PUT"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=32)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
 
-def _send_single_file(file_path: str, name: str, k_data: bytes, config) -> Manifest:
-    """Send a single file by treating it as a one-file directory."""
-    dir_path = os.path.dirname(file_path) or "."
-    filename = os.path.basename(file_path)
-    manifest = build_manifest(dir_path, name, config.segment_size)
-    manifest.erasure_data_shards = config.data_shards
-    manifest.erasure_parity_shards = config.parity_shards
-
-    # Filter to only the requested file
-    manifest.files = [f for f in manifest.files if f.path == filename]
-    manifest.total_bytes = sum(f.size for f in manifest.files)
-
-    for f in manifest.files:
-        full_path = os.path.join(dir_path, f.path)
-        for seg in f.segments:
-            seg_idx = int(seg.id.split("_")[1])
-            plaintext = read_file_segment(full_path, seg_idx, config.segment_size)
-            encrypted = crypto.encrypt_segment(k_data, plaintext)
-            shards = erasure.encode_segment(encrypted)
-
-            shard_infos = []
-            for shard_idx, shard in enumerate(shards):
-                h = crypto.content_hash(shard)
-                node = config.storage_nodes[shard_idx % len(config.storage_nodes)]
-                _upload_shard(node, h, shard)
-                shard_infos.append(ManifestShard(
-                    index=shard_idx, hash=h, node=node,
-                ))
-
-            seg.encrypted_size = len(encrypted)
-            seg.shards = shard_infos
-
-    return manifest
+def _warn_if_too_few_nodes(nodes: int, total_shards: int, parity_shards: int) -> None:
+    per_node = -(-total_shards // nodes)
+    if per_node > parity_shards:
+        print(
+            f"warning: with {nodes} storage node(s), each holds up to {per_node} of "
+            f"{total_shards} shards per segment; losing a single node makes the "
+            f"transfer unrecoverable (use at least {-(-total_shards // parity_shards)} nodes)",
+            file=sys.stderr,
+        )
 
 
-def _upload_shard(node_url: str, hash_hex: str, data: bytes) -> None:
+def _upload_shard(session: requests.Session, index: int, node_url: str, data: bytes) -> ManifestShard:
     """Upload a shard to a storage node."""
-    url = f"{node_url}/shard/{hash_hex}"
-    resp = requests.put(url, data=data, headers={"Content-Type": "application/octet-stream"})
-    if not resp.status_code in (200, 201):
+    h = crypto.content_hash(data)
+    resp = session.put(
+        f"{node_url}/shard/{h}", data=data,
+        headers={"Content-Type": "application/octet-stream"}, timeout=TIMEOUT,
+    )
+    if resp.status_code not in (200, 201):
         raise RuntimeError(f"shard upload to {node_url} returned {resp.status_code}")
+    return ManifestShard(index=index, hash=h, node=node_url)
 
 
-def _upload_manifest(relay_url: str, r_hash: str, data: bytes) -> None:
+def _upload_manifest(session: requests.Session, relay_url: str, r_hash: str, data: bytes) -> None:
     """Upload encrypted manifest to relay."""
-    url = f"{relay_url}/manifest/{r_hash}"
-    resp = requests.put(url, data=data, headers={"Content-Type": "application/octet-stream"})
-    if not resp.status_code in (200, 201):
+    resp = session.put(
+        f"{relay_url}/manifest/{r_hash}", data=data,
+        headers={"Content-Type": "application/octet-stream"}, timeout=TIMEOUT,
+    )
+    if resp.status_code not in (200, 201):
         raise RuntimeError(f"manifest upload returned {resp.status_code}")
 
 
-def _download_manifest(relay_url: str, r_hash: str) -> bytes:
+def _download_manifest(session: requests.Session, relay_url: str, r_hash: str) -> bytes:
     """Download encrypted manifest from relay (one-time retrieval)."""
-    url = f"{relay_url}/manifest/{r_hash}"
-    resp = requests.get(url)
+    resp = session.get(f"{relay_url}/manifest/{r_hash}", timeout=TIMEOUT)
+    if resp.status_code == 404:
+        raise RuntimeError(
+            "transfer not found: the code is wrong, it expired, or it was already received"
+        )
     if resp.status_code != 200:
         raise RuntimeError(f"manifest download returned {resp.status_code}")
     return resp.content
 
 
-def _download_shards(segment: ManifestSegment) -> List[Optional[bytes]]:
-    """Download all shards for a segment concurrently."""
-    config = get_config()
-    total_shards = config.data_shards + config.parity_shards
-    shards: List[Optional[bytes]] = [None] * total_shards
+def _download_shards(
+    session: requests.Session,
+    pool: ThreadPoolExecutor,
+    segment: ManifestSegment,
+    data_shards: int,
+    parity_shards: int,
+) -> List[Optional[bytes]]:
+    """Download enough shards to rebuild a segment, in parallel. Shards whose
+    content doesn't match the manifest hash (corrupt or malicious node) are
+    discarded, and we stop as soon as data_shards good shards have arrived."""
+    shards: List[Optional[bytes]] = [None] * (data_shards + parity_shards)
 
-    def fetch_shard(shard: ManifestShard) -> tuple[int, Optional[bytes]]:
-        url = f"{shard.node}/shard/{shard.hash}"
+    def fetch_shard(shard: ManifestShard) -> Optional[bytes]:
         try:
-            resp = requests.get(url)
-            if resp.status_code == 200:
-                return shard.index, resp.content
-        except Exception:
-            pass
-        return shard.index, None
+            resp = session.get(f"{shard.node}/shard/{shard.hash}", timeout=TIMEOUT)
+        except requests.RequestException:
+            return None
+        if resp.status_code == 200 and crypto.content_hash(resp.content) == shard.hash:
+            return resp.content
+        return None
 
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        futures = [executor.submit(fetch_shard, s) for s in segment.shards]
-        for future in as_completed(futures):
-            idx, data = future.result()
-            if data is not None:
-                shards[idx] = data
+    futures = {pool.submit(fetch_shard, s): s.index for s in segment.shards}
+    have = 0
+    for future in as_completed(futures):
+        data = future.result()
+        if data is not None:
+            shards[futures[future]] = data
+            have += 1
+            if have == data_shards:
+                break
+    for future in futures:
+        future.cancel()  # skip any downloads that haven't started yet
 
+    if have < data_shards:
+        raise RuntimeError(
+            f"segment {segment.id}: only {have} of {data_shards} needed shards are available"
+        )
     return shards
 
 
 def _compute_file_hash(filepath: str) -> str:
     """Compute BLAKE3 hash of a file."""
-    import blake3
     h = blake3.blake3()
     with open(filepath, "rb") as f:
         while True:
@@ -261,18 +298,20 @@ def _compute_file_hash(filepath: str) -> str:
     return h.hexdigest()
 
 
-_WORDS = [
-    "orbit", "velvet", "guitar", "battery", "candle", "dragon", "ember",
-    "falcon", "galaxy", "harbor", "iris", "jungle", "kettle", "lantern",
-    "meadow", "nebula", "ocean", "phoenix", "quartz", "raven", "silver",
-    "thunder", "umbra", "vortex", "willow", "xenon", "yonder", "zephyr",
-    "amber", "breeze",
-]
+# Number of words in a transfer code. Each word from the 7776-word EFF list
+# adds ~12.9 bits, so 6 words gives ~77 bits. The code is the only secret
+# (there is no PAKE in an async transfer), so it must resist offline brute
+# force and enumeration of the relay.
+CODE_WORDS = 6
+
+
+@functools.lru_cache(maxsize=1)
+def _wordlist() -> List[str]:
+    text = (Path(__file__).parent / "wordlist.txt").read_text(encoding="utf-8")
+    return text.split()
 
 
 def _generate_code() -> str:
-    """Generate a human-readable transfer code: number-word-word."""
-    num = random.randint(1, 99)
-    w1 = random.choice(_WORDS)
-    w2 = random.choice(_WORDS)
-    return f"{num}-{w1}-{w2}"
+    """Generate a human-readable transfer code: word-word-word-word-word-word."""
+    words = _wordlist()
+    return "-".join(secrets.choice(words) for _ in range(CODE_WORDS))

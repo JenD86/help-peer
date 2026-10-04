@@ -561,7 +561,6 @@ dependencies = [
  "clap",
  "hex",
  "hkdf",
- "hmac",
  "rand",
  "reed-solomon-erasure",
  "reqwest",

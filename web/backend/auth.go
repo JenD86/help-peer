@@ -1,21 +1,34 @@
 package main
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
+	"net/mail"
+	"strings"
+	"time"
 )
 
 type Auth struct {
 	db         *DB
 	smtpConfig *SMTPConfig
+	baseURL    string
+
+	// Login emails go out from the operator's mail account, so cap how many
+	// any one client or address can trigger.
+	requestsPerIP    *rateLimiter
+	requestsPerEmail *rateLimiter
 }
 
-func NewAuth(db *DB, smtp *SMTPConfig) *Auth {
-	return &Auth{db: db, smtpConfig: smtp}
+func NewAuth(db *DB, smtp *SMTPConfig, baseURL string) *Auth {
+	return &Auth{
+		db:               db,
+		smtpConfig:       smtp,
+		baseURL:          baseURL,
+		requestsPerIP:    newRateLimiter(10, 15*time.Minute),
+		requestsPerEmail: newRateLimiter(3, 15*time.Minute),
+	}
 }
 
 func (a *Auth) authRequestHandler(w http.ResponseWriter, req *http.Request) {
@@ -27,13 +40,19 @@ func (a *Auth) authRequestHandler(w http.ResponseWriter, req *http.Request) {
 	var body struct {
 		Email string `json:"email"`
 	}
+	req.Body = http.MaxBytesReader(w, req.Body, 4096)
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 
-	if body.Email == "" || !isValidEmail(body.Email) {
+	if !isValidEmail(body.Email) {
 		writeError(w, http.StatusBadRequest, "valid email required")
+		return
+	}
+
+	if !a.requestsPerIP.Allow(clientIP(req), 1) || !a.requestsPerEmail.Allow(strings.ToLower(body.Email), 1) {
+		writeError(w, http.StatusTooManyRequests, "too many login requests, try again later")
 		return
 	}
 
@@ -43,8 +62,7 @@ func (a *Auth) authRequestHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	baseURL := getBaseURL(req)
-	magicURL := fmt.Sprintf("%s/verify?token=%s", baseURL, link.Token)
+	magicURL := fmt.Sprintf("%s/verify?token=%s", a.baseURL, link.Token)
 
 	if a.smtpConfig.Host != "" {
 		if err := sendMagicLinkEmail(a.smtpConfig, body.Email, magicURL); err != nil {
@@ -71,6 +89,7 @@ func (a *Auth) authVerifyHandler(w http.ResponseWriter, req *http.Request) {
 	var body struct {
 		Token string `json:"token"`
 	}
+	req.Body = http.MaxBytesReader(w, req.Body, 4096)
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
@@ -89,8 +108,9 @@ func (a *Auth) authVerifyHandler(w http.ResponseWriter, req *http.Request) {
 		Value:    sessionToken,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   strings.HasPrefix(a.baseURL, "https://"),
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   86400 * 7,
+		MaxAge:   int(sessionTTL.Seconds()),
 	})
 
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -110,6 +130,8 @@ func (a *Auth) authLogoutHandler(w http.ResponseWriter, req *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   strings.HasPrefix(a.baseURL, "https://"),
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
 
@@ -139,37 +161,12 @@ func (a *Auth) authMeHandler(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
-func (a *Auth) GetUserBySession(token string) (string, bool) {
-	return a.db.GetSession(token)
-}
-
+// isValidEmail accepts a bare address (no display name), which also rules
+// out CR/LF and anything else that could inject email headers.
 func isValidEmail(email string) bool {
-	parsed, err := url.Parse("mailto:" + email)
-	if err != nil {
+	if email == "" || len(email) > 254 || strings.ContainsAny(email, "\r\n") {
 		return false
 	}
-	return parsed.Opaque != "" && containsStr(email, "@")
+	addr, err := mail.ParseAddress(email)
+	return err == nil && addr.Address == email && strings.Contains(email, "@")
 }
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-func getBaseURL(req *http.Request) string {
-	scheme := "http"
-	if req.TLS != nil {
-		scheme = "https"
-	}
-	if h := req.Header.Get("X-Forwarded-Proto"); h != "" {
-		scheme = h
-	}
-	return fmt.Sprintf("%s://%s", scheme, req.Host)
-}
-
-// Ensure crypto/rand is used
-var _ = rand.Reader

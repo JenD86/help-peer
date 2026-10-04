@@ -1,12 +1,14 @@
 import { useState } from 'react'
-import { deriveKeys, relayHash, decryptSegment, base64ToBuf } from '../lib/crypto'
+import { deriveKeys, relayHash, decryptSegment, fileHasher } from '../lib/crypto'
 import { downloadManifest, downloadSegment, type ShardInfo } from '../lib/api'
 
 interface ManifestFile {
   path: string
   size: number
+  blake3?: string
   segments: {
     id: string
+    original_size: number
     encrypted_size: number
     shards: ShardInfo[]
   }[]
@@ -22,70 +24,128 @@ interface Manifest {
   files: ManifestFile[]
 }
 
+// Minimal File System Access API typing (Chromium); not in TypeScript's DOM lib.
+interface FileWritable {
+  write(data: ArrayBuffer): Promise<void>
+  close(): Promise<void>
+}
+interface DirHandle {
+  getDirectoryHandle(name: string, opts: { create: boolean }): Promise<DirHandle>
+  getFileHandle(name: string, opts: { create: boolean }): Promise<{ createWritable(): Promise<FileWritable> }>
+}
+const pickDirectory = (window as any).showDirectoryPicker as
+  | ((opts: { mode: 'readwrite' }) => Promise<DirHandle>)
+  | undefined
+
+// The manifest comes from the sender: split its path and reject anything
+// that could escape the chosen folder (same rules as the CLI).
+function safePathParts(path: string): string[] {
+  const parts = path.split('/')
+  if (!path || parts.some(p => p === '' || p === '.' || p === '..' || /[\\:\0]/.test(p))) {
+    throw new Error(`Unsafe file path in transfer: ${JSON.stringify(path)}`)
+  }
+  return parts
+}
+
+function checkManifest(m: Manifest) {
+  if (m.version !== 1 || m.erasure_data_shards !== 8 || m.erasure_parity_shards !== 4 || !Array.isArray(m.files)) {
+    throw new Error('Unsupported transfer format')
+  }
+  for (const f of m.files) safePathParts(f.path)
+}
+
 export default function Download() {
   const [code, setCode] = useState('')
-  const [status, setStatus] = useState<'idle' | 'fetching' | 'downloading' | 'decrypting' | 'done' | 'error'>('idle')
+  const [status, setStatus] = useState<'idle' | 'fetching' | 'downloading' | 'done' | 'error'>('idle')
   const [progress, setProgress] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
   const [downloadedFiles, setDownloadedFiles] = useState<string[]>([])
 
   const handleDownload = async () => {
     if (!code.trim()) return
-    setStatus('fetching')
-    setProgress('Deriving keys from code...')
     setErrorMsg('')
 
+    // Where supported, stream files straight into a folder the user picks,
+    // so large transfers never have to fit in memory. The picker must open
+    // before any other await, while the click still counts as a user gesture.
+    let dir: DirHandle | null = null
+    if (pickDirectory) {
+      try {
+        dir = await pickDirectory({ mode: 'readwrite' })
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return // user cancelled
+      }
+    }
+
+    setStatus('fetching')
+    setProgress('Deriving keys from code...')
+
     try {
-      const { kData, kIndex } = await deriveKeys(code.trim())
-      const rHash = await relayHash(kIndex)
+      const { kData, kIndex } = await deriveKeys(code)
 
       setProgress('Fetching manifest from relay...')
-      const manifestData = await downloadManifest(rHash)
+      const manifestData = await downloadManifest(relayHash(kIndex))
 
       setProgress('Decrypting manifest...')
-      const manifestJson = await decryptSegment(kData, manifestData)
-      const manifest: Manifest = JSON.parse(new TextDecoder().decode(manifestJson))
+      let manifest: Manifest
+      try {
+        manifest = JSON.parse(new TextDecoder().decode(await decryptSegment(kData, manifestData)))
+      } catch {
+        throw new Error('Could not decrypt the transfer. Check the code.')
+      }
+      checkManifest(manifest)
 
-      setProgress(`Downloading ${manifest.files.length} file(s)...`)
       setStatus('downloading')
-
       const downloaded: string[] = []
+      const total = manifest.total_bytes || 1
+      let doneBytes = 0
 
-      for (let fi = 0; fi < manifest.files.length; fi++) {
-        const file = manifest.files[fi]
-        const fileChunks: ArrayBuffer[] = []
+      for (const file of manifest.files) {
+        const parts = safePathParts(file.path)
+        const hasher = fileHasher()
+
+        // Open the output: a file in the chosen folder, or an in-memory list of chunks
+        let writable: FileWritable | null = null
+        const chunks: ArrayBuffer[] = []
+        if (dir) {
+          let d = dir
+          for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p, { create: true })
+          writable = await (await d.getFileHandle(parts[parts.length - 1], { create: true })).createWritable()
+        }
 
         for (let si = 0; si < file.segments.length; si++) {
           const seg = file.segments[si]
-          setProgress(`Downloading ${file.path} — segment ${si + 1}/${file.segments.length}`)
+          setProgress(`Downloading ${file.path} — ${Math.floor((doneBytes / total) * 100)}% overall`)
 
-          const encryptedSegment = await downloadSegment(
+          const encrypted = await downloadSegment(
             seg.shards,
+            seg.encrypted_size,
             manifest.erasure_data_shards,
             manifest.erasure_parity_shards
           )
-
-          setProgress(`Decrypting ${file.path} — segment ${si + 1}/${file.segments.length}`)
-          const plaintext = await decryptSegment(kData, encryptedSegment)
-          fileChunks.push(plaintext)
+          const plaintext = await decryptSegment(kData, encrypted)
+          hasher.update(plaintext)
+          if (writable) await writable.write(plaintext)
+          else chunks.push(plaintext)
+          doneBytes += plaintext.byteLength
         }
 
-        // Combine chunks and trigger download
-        const totalSize = fileChunks.reduce((s, c) => s + c.byteLength, 0)
-        const combined = new Uint8Array(totalSize)
-        let offset = 0
-        for (const chunk of fileChunks) {
-          combined.set(new Uint8Array(chunk), offset)
-          offset += chunk.byteLength
+        if (file.blake3 && hasher.hexdigest() !== file.blake3) {
+          throw new Error(`${file.path} is corrupt (BLAKE3 mismatch)`)
         }
 
-        const blob = new Blob([combined], { type: 'application/octet-stream' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = file.path
-        a.click()
-        URL.revokeObjectURL(url)
+        if (writable) {
+          await writable.close()
+        } else {
+          // Fallback: hand the assembled file to the browser's download manager
+          const url = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }))
+          const a = document.createElement('a')
+          a.href = url
+          a.download = parts.join('_')
+          a.click()
+          // Revoking immediately can cancel the download in some browsers
+          setTimeout(() => URL.revokeObjectURL(url), 60_000)
+        }
         downloaded.push(file.path)
       }
 
@@ -94,20 +154,28 @@ export default function Download() {
       setProgress('')
     } catch (err: any) {
       setStatus('error')
+      setProgress('')
       setErrorMsg(err.message || 'Download failed. Check your code.')
     }
   }
 
+  const busy = status === 'fetching' || status === 'downloading'
+
   return (
     <div className="max-w-md mx-auto px-6 py-16">
       <h1 className="text-3xl font-bold text-gray-900 mb-2">Receive Files</h1>
-      <p className="text-gray-600 mb-8">Enter the transfer code you received.</p>
+      <p className="text-gray-600 mb-8">
+        Enter the transfer code you received.
+        {pickDirectory
+          ? " You'll be asked for a folder to save into."
+          : ' Files are assembled in memory, so for very large transfers use the command-line client.'}
+      </p>
 
       {status === 'done' ? (
         <div className="text-center">
           <div className="text-5xl mb-4">✅</div>
           <h2 className="text-xl font-bold text-gray-900 mb-2">Download Complete!</h2>
-          <p className="text-gray-600 mb-4">{downloadedFiles.length} file(s) downloaded:</p>
+          <p className="text-gray-600 mb-4">{downloadedFiles.length} file(s) downloaded and verified:</p>
           <div className="bg-gray-50 rounded-lg p-4 mb-6">
             {downloadedFiles.map((f, i) => (
               <div key={i} className="text-sm text-gray-700">{f}</div>
@@ -128,20 +196,19 @@ export default function Download() {
         <div>
           <input
             type="text"
-            placeholder="e.g. 38-vortex-xenon"
+            placeholder="e.g. orbit-velvet-zoom-candle-harbor-ember"
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleDownload()}
+            onKeyDown={(e) => e.key === 'Enter' && !busy && handleDownload()}
             className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-4 font-mono text-center text-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           />
           <button
             onClick={handleDownload}
-            disabled={!code.trim() || status === 'fetching' || status === 'downloading' || status === 'decrypting'}
+            disabled={!code.trim() || busy}
             className="w-full bg-indigo-600 text-white py-3 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 transition mb-4"
           >
             {status === 'fetching' ? 'Fetching...' :
              status === 'downloading' ? 'Downloading...' :
-             status === 'decrypting' ? 'Decrypting...' :
              'Download & Decrypt'}
           </button>
 

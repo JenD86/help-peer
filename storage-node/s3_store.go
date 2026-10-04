@@ -26,9 +26,10 @@ type S3Store struct {
 	keyPrefix  string
 	shardIndex map[string]time.Time // hash -> expiry time
 	usedBytes  int64
+	ttl        time.Duration
 }
 
-func NewS3Store(ctx context.Context) (*S3Store, error) {
+func NewS3Store(ctx context.Context, ttl time.Duration) (*S3Store, error) {
 	bucket := os.Getenv("S3_BUCKET")
 	if bucket == "" {
 		return nil, fmt.Errorf("S3_BUCKET is required for S3 backend")
@@ -73,6 +74,7 @@ func NewS3Store(ctx context.Context) (*S3Store, error) {
 		bucket:     bucket,
 		keyPrefix:  keyPrefix,
 		shardIndex: make(map[string]time.Time),
+		ttl:        ttl,
 	}
 
 	// Rebuild index from existing objects
@@ -92,10 +94,7 @@ func (s *S3Store) Put(hash string, data io.Reader, ttl time.Duration) (int64, er
 
 	// Check if shard already exists (dedup)
 	if _, err := s.Exists(hash); err == nil {
-		s.mu.Lock()
-		s.shardIndex[hash] = time.Now().Add(ttl)
-		s.mu.Unlock()
-		return int64(len(buf)), nil
+		return int64(len(buf)), s.Touch(hash, ttl)
 	}
 
 	_, err = s.client.PutObject(context.TODO(), &s3.PutObjectInput{
@@ -186,6 +185,16 @@ func (s *S3Store) Exists(hash string) (int64, error) {
 	return 0, nil
 }
 
+// Touch refreshes the shard's expiry in the in-memory index. After a restart
+// the expiry is recomputed from the object's LastModified time, so a touch
+// only lasts until the node restarts.
+func (s *S3Store) Touch(hash string, ttl time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shardIndex[hash] = time.Now().Add(ttl)
+	return nil
+}
+
 func (s *S3Store) UsedBytes() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -250,8 +259,13 @@ func (s *S3Store) rebuildIndex(ctx context.Context) {
 					total += *obj.Size
 				}
 
-				// Use default TTL; metadata not available in ListObjects
-				s.shardIndex[hash] = time.Now().Add(24 * time.Hour)
+				// Expire relative to upload time; metadata isn't available in
+				// ListObjects, and resetting to now would let shards live forever.
+				expiry := time.Now().Add(s.ttl)
+				if obj.LastModified != nil {
+					expiry = obj.LastModified.Add(s.ttl)
+				}
+				s.shardIndex[hash] = expiry
 			}
 		}
 	}

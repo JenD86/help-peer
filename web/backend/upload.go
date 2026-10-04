@@ -2,259 +2,232 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/klauspost/reedsolomon"
+	"lukechampine.com/blake3"
 )
 
 const (
 	DataShards   = 8
-	ParityShards  = 4
+	ParityShards = 4
 	TotalShards  = DataShards + ParityShards
+
+	SegmentSize = 64 * 1024 * 1024
+	// AES-GCM adds a 12-byte nonce and a 16-byte tag to each segment.
+	segmentOverhead     = 12 + 16
+	maxEncryptedSegment = SegmentSize + segmentOverhead
+
+	maxManifestBytes = 32 << 20
+	maxRetrievalsCap = 100
+	maxNameLength    = 200
 )
 
-// UploadRequest is the JSON body for the upload API.
-type UploadRequest struct {
-	TransferName string             `json:"transfer_name"`
-	Files        []UploadFile       `json:"files"`
-	ManifestHash string             `json:"manifest_hash"` // BLAKE3(K_index) hex
-	ManifestData []byte             `json:"manifest_data"` // encrypted manifest
-	MaxRetrievals int                `json:"max_retrievals"`
+// httpClient is shared so connections to nodes and the relay are pooled.
+var httpClient = &http.Client{Timeout: 5 * time.Minute}
+
+// SegmentUploadResponse tells the browser where a segment's shards went, so
+// it can build the manifest.
+type SegmentUploadResponse struct {
+	EncryptedSize int         `json:"encrypted_size"`
+	Shards        []ShardInfo `json:"shards"`
 }
 
-type UploadFile struct {
-	Path     string           `json:"path"`
-	Size     int64            `json:"size"`
-	Segments []UploadSegment  `json:"segments"`
-}
-
-type UploadSegment struct {
-	ID             string `json:"id"`
-	EncryptedSize  int    `json:"encrypted_size"`
-	EncryptedData  []byte `json:"encrypted_data"` // encrypted by browser
-}
-
-// UploadResponse is returned after successful upload.
-type UploadResponse struct {
-	Code       string `json:"code"`
-	TransferName string `json:"transfer_name"`
-	Files      int    `json:"files"`
-	TotalBytes int64  `json:"total_bytes"`
-}
-
-func (s *Server) uploadHandler(w http.ResponseWriter, req *http.Request) {
+// segmentUploadHandler takes one encrypted segment (raw bytes, already
+// encrypted by the browser), erasure-codes it and stores the shards.
+func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	// Parse the multipart/JSON body
-	var upload UploadRequest
-	if err := json.NewDecoder(req.Body).Decode(&upload); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	data, err := io.ReadAll(http.MaxBytesReader(w, req.Body, maxEncryptedSegment))
+	if err != nil {
+		if strings.Contains(err.Error(), "request body too large") {
+			writeError(w, http.StatusRequestEntityTooLarge, "segment too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "read failed")
+		return
+	}
+	if len(data) <= segmentOverhead {
+		writeError(w, http.StatusBadRequest, "segment too small")
 		return
 	}
 
-	if len(upload.Files) == 0 {
-		writeError(w, http.StatusBadRequest, "no files")
-		return
-	}
-
-	if upload.MaxRetrievals <= 0 {
-		upload.MaxRetrievals = 1
-	}
-
-	// Erasure code each segment and upload shards
 	enc, err := reedsolomon.New(DataShards, ParityShards)
 	if err != nil {
-		log.Printf("Reed-Solomon init error: %v", err)
+		writeError(w, http.StatusInternalServerError, "erasure coding error")
+		return
+	}
+	shards, err := enc.Split(data)
+	if err == nil {
+		err = enc.Encode(shards)
+	}
+	if err != nil {
+		log.Printf("Erasure coding error: %v", err)
 		writeError(w, http.StatusInternalServerError, "erasure coding error")
 		return
 	}
 
-	manifest := buildManifestJSON(upload)
-	var totalBytes int64
+	// Upload the shards in parallel (round-robin node assignment)
+	infos := make([]ShardInfo, len(shards))
+	errs := make([]error, len(shards))
+	var wg sync.WaitGroup
+	for i, shard := range shards {
+		node := s.storageNodes[i%len(s.storageNodes)]
+		sum := blake3.Sum256(shard)
+		hash := hex.EncodeToString(sum[:])
+		infos[i] = ShardInfo{Index: i, Hash: hash, Node: node.Public}
 
-	for fileIdx, f := range upload.Files {
-		totalBytes += f.Size
-		for segIdx, seg := range f.Segments {
-			// Split encrypted data into shards
-			shards, err := enc.Split(seg.EncryptedData)
-			if err != nil {
-				log.Printf("Split error: %v", err)
-				writeError(w, http.StatusInternalServerError, "erasure split error")
-				return
-			}
+		wg.Add(1)
+		go func(i int, nodeURL, hash string, shard []byte) {
+			defer wg.Done()
+			errs[i] = uploadShard(nodeURL, hash, shard)
+		}(i, node.Internal, hash, shard)
+	}
+	wg.Wait()
 
-			if err := enc.Encode(shards); err != nil {
-				log.Printf("Encode error: %v", err)
-				writeError(w, http.StatusInternalServerError, "erasure encode error")
-				return
-			}
-
-			// Upload each shard to storage nodes
-			shardInfos := []map[string]interface{}{}
-			for shardIdx, shard := range shards {
-				if shard == nil {
-					continue
-				}
-				hash := sha256Sum(shard)
-				node := s.storageNodes[shardIdx%len(s.storageNodes)]
-
-				if err := uploadShard(node, hash, shard); err != nil {
-					log.Printf("Shard upload error: %v", err)
-					writeError(w, http.StatusInternalServerError, "shard upload failed")
-					return
-				}
-
-				shardInfos = append(shardInfos, map[string]interface{}{
-					"index": shardIdx,
-					"hash":  hash,
-					"node":  node,
-				})
-			}
-
-			manifest["files"].([]map[string]interface{})[fileIdx]["segments"].([]map[string]interface{})[segIdx]["shards"] = shardInfos
+	for _, err := range errs {
+		if err != nil {
+			log.Printf("Shard upload error: %v", err)
+			writeError(w, http.StatusBadGateway, "shard upload failed")
+			return
 		}
 	}
 
-	// Encrypt manifest is already done by browser — upload.ManifestData is the encrypted manifest
-	// Upload manifest to relay with max retrievals
-	if err := uploadManifest(s.relayURL, upload.ManifestHash, upload.ManifestData, upload.MaxRetrievals); err != nil {
-		log.Printf("Manifest upload error: %v", err)
-		writeError(w, http.StatusInternalServerError, "manifest upload failed")
+	writeJSON(w, http.StatusOK, SegmentUploadResponse{EncryptedSize: len(data), Shards: infos})
+}
+
+// ManifestUploadRequest carries the browser-encrypted manifest plus the
+// plaintext details shown in the sender's history.
+type ManifestUploadRequest struct {
+	ManifestHash  string `json:"manifest_hash"` // BLAKE3(K_index) hex
+	ManifestData  []byte `json:"manifest_data"` // encrypted manifest (base64 in JSON)
+	MaxRetrievals int    `json:"max_retrievals"`
+	TransferName  string `json:"transfer_name"`
+	Files         int    `json:"files"`
+	TotalBytes    int64  `json:"total_bytes"`
+}
+
+func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	// Save transfer record
-	senderEmail, _ := s.getUserEmail(req)
-	record := &TransferRecord{
-		Code:         "", // code is generated by browser, not stored here for security
-		SenderEmail:  senderEmail,
-		TransferName: upload.TransferName,
-		Files:        len(upload.Files),
-		TotalBytes:   totalBytes,
-		CreatedAt:    time.Now(),
+	var body ManifestUploadRequest
+	// base64 inflates by 4/3
+	req.Body = http.MaxBytesReader(w, req.Body, maxManifestBytes*4/3+4096)
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
 	}
-	if record.Code == "" {
-		record.Code = "web-upload"
+	if !isHexHash(body.ManifestHash) {
+		writeError(w, http.StatusBadRequest, "invalid manifest hash")
+		return
 	}
-	s.db.SaveTransfer(record)
+	if len(body.ManifestData) == 0 {
+		writeError(w, http.StatusBadRequest, "empty manifest")
+		return
+	}
+	if body.MaxRetrievals == 0 {
+		body.MaxRetrievals = 1
+	}
+	if body.MaxRetrievals < 1 || body.MaxRetrievals > maxRetrievalsCap {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("max_retrievals must be 1-%d", maxRetrievalsCap))
+		return
+	}
 
-	writeJSON(w, http.StatusOK, UploadResponse{
-		TransferName: upload.TransferName,
-		Files:        len(upload.Files),
-		TotalBytes:   totalBytes,
-	})
-}
-
-func buildManifestJSON(upload UploadRequest) map[string]interface{} {
-	files := []map[string]interface{}{}
-	for _, f := range upload.Files {
-		segs := []map[string]interface{}{}
-		for _, seg := range f.Segments {
-			segs = append(segs, map[string]interface{}{
-				"id":             seg.ID,
-				"original_size":  0,
-				"encrypted_size": seg.EncryptedSize,
-				"shards":         []map[string]interface{}{},
-			})
+	status, err := uploadManifest(s.relayURL, body.ManifestHash, body.ManifestData, body.MaxRetrievals)
+	if err != nil {
+		log.Printf("Manifest upload error: %v", err)
+		if status == http.StatusConflict {
+			writeError(w, http.StatusConflict, "transfer code already in use, please retry")
+			return
 		}
-		files = append(files, map[string]interface{}{
-			"path":     f.Path,
-			"size":     f.Size,
-			"segments": segs,
-		})
+		writeError(w, http.StatusBadGateway, "manifest upload failed")
+		return
 	}
-	return map[string]interface{}{
-		"version":               1,
-		"transfer_name":         upload.TransferName,
-		"total_bytes":           0,
-		"segment_size":          67108864,
-		"erasure_data_shards":   DataShards,
-		"erasure_parity_shards": ParityShards,
-		"files":                 files,
+
+	// Record the transfer in the sender's history. The code is never sent
+	// here, so the server can't decrypt the transfer.
+	resp := map[string]string{"status": "ok"}
+	if email, ok := s.getUserEmail(req); ok {
+		record := &TransferRecord{
+			ID:           generateToken(16),
+			SenderEmail:  email,
+			TransferName: truncate(body.TransferName, maxNameLength),
+			Files:        body.Files,
+			TotalBytes:   body.TotalBytes,
+			CreatedAt:    time.Now(),
+		}
+		s.db.SaveTransfer(record)
+		resp["transfer_id"] = record.ID
 	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
-func sha256Sum(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
+// truncate shortens s to at most n bytes without splitting a UTF-8 character.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// putWithRetry PUTs data to url, retrying network errors and 5xx responses.
+// It returns the final status code.
+func putWithRetry(url string, data []byte, headers map[string]string) (int, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(1<<attempt) * time.Second)
+		}
+		req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+			return resp.StatusCode, nil
+		}
+		lastErr = fmt.Errorf("%s returned %d", url, resp.StatusCode)
+		if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return resp.StatusCode, lastErr
+		}
+	}
+	return 0, lastErr
 }
 
 func uploadShard(nodeURL, hash string, data []byte) error {
-	url := nodeURL + "/shard/" + hash
-	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("shard upload to %s returned %d", nodeURL, resp.StatusCode)
-	}
-	return nil
+	_, err := putWithRetry(nodeURL+"/shard/"+hash, data, nil)
+	return err
 }
 
-func uploadManifest(relayURL, hash string, data []byte, maxRetrievals int) error {
-	url := relayURL + "/manifest/" + hash
-	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("X-Max-Retrievals", intToStr(maxRetrievals))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("manifest upload returned %d", resp.StatusCode)
-	}
-	return nil
+func uploadManifest(relayURL, hash string, data []byte, maxRetrievals int) (int, error) {
+	return putWithRetry(relayURL+"/manifest/"+hash, data, map[string]string{
+		"X-Max-Retrievals": fmt.Sprintf("%d", maxRetrievals),
+	})
 }
-
-func intToStr(n int) string {
-	return fmt.Sprintf("%d", n)
-}
-
-// Concurrent shard upload helper
-func uploadShardsConcurrently(nodeURL string, shards map[string][]byte) error {
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(shards))
-
-	for hash, data := range shards {
-		wg.Add(1)
-		go func(h string, d []byte) {
-			defer wg.Done()
-			if err := uploadShard(nodeURL, h, d); err != nil {
-				errCh <- err
-			}
-		}(hash, data)
-	}
-
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-var _ = io.Copy
-var _ = log.Printf

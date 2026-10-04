@@ -23,6 +23,9 @@ type ShardStore interface {
 	// Exists checks if a shard exists and returns its size.
 	Exists(hash string) (int64, error)
 
+	// Touch extends an existing shard's expiry to now + ttl.
+	Touch(hash string, ttl time.Duration) error
+
 	// UsedBytes returns the total bytes currently stored.
 	UsedBytes() int64
 

@@ -1,8 +1,29 @@
 import { useState, useCallback } from 'react'
-import { deriveKeys, relayHash, encryptSegment, generateCode, bufToBase64 } from '../lib/crypto'
-import { uploadTransfer, notifyRecipients, type UploadFile, type UploadResult } from '../lib/api'
+import { deriveKeys, relayHash, encryptSegment, generateCode, fileHasher } from '../lib/crypto'
+import { uploadSegment, uploadManifest, notifyRecipients, checkAuth, type ShardInfo } from '../lib/api'
 
 const SEGMENT_SIZE = 64 * 1024 * 1024 // 64MB
+const MAX_RETRIEVALS = 100
+
+interface ManifestSegment {
+  id: string
+  original_size: number
+  encrypted_size: number
+  shards: ShardInfo[]
+}
+
+// Make a browser file name safe and unique as a manifest path. Receivers
+// reject '\', ':' and NUL in paths, and duplicate paths would overwrite each other.
+function manifestPath(name: string, used: Set<string>): string {
+  const base = name.replace(/[\\:\0/]/g, '_') || 'file'
+  let path = base
+  for (let n = 2; used.has(path); n++) {
+    const dot = base.lastIndexOf('.')
+    path = dot > 0 ? `${base.slice(0, dot)} (${n})${base.slice(dot)}` : `${base} (${n})`
+  }
+  used.add(path)
+  return path
+}
 
 export default function Upload() {
   const [files, setFiles] = useState<File[]>([])
@@ -50,88 +71,93 @@ export default function Upload() {
     setErrorMsg('')
 
     try {
-      const code = generateCode()
-      const { kData, kIndex } = await deriveKeys(code)
-      const rHash = await relayHash(kIndex)
-
-      // Encrypt each file
-      const uploadFiles: UploadFile[] = []
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i]
-        setProgress(`Encrypting ${file.name}...`)
-
-        // For files larger than SEGMENT_SIZE, we'd chunk — but for web, encrypt whole file
-        // (backend handles erasure coding on the encrypted blob)
-        const data = await file.arrayBuffer()
-        const encrypted = await encryptSegment(kData, data)
-        uploadFiles.push({
-          path: file.name,
-          size: file.size,
-          data: encrypted,
-        })
-      }
-
-      // Build manifest (encrypted by browser, sent to backend which uploads to relay)
-      setProgress('Building manifest...')
-      const manifest = {
-        version: 1,
-        transfer_name: transferName || files[0].name,
-        total_bytes: totalBytes,
-        segment_size: SEGMENT_SIZE,
-        erasure_data_shards: 8,
-        erasure_parity_shards: 4,
-        files: uploadFiles.map(f => ({
-          path: f.path,
-          size: f.size,
-          segments: [{
-            id: 'seg_000000',
-            encrypted_size: f.data.byteLength,
-            shards: [],
-          }],
-        })),
-      }
-
-      const manifestJson = new TextEncoder().encode(JSON.stringify(manifest)).buffer as ArrayBuffer
-      const encryptedManifest = await encryptSegment(kData, manifestJson)
-
-      // Parse recipients
       const recipientList = recipients
         .split(/[,;\n]/)
         .map(r => r.trim())
         .filter(r => r.length > 0)
+      if (recipientList.length > 0 && !(await checkAuth()).authenticated) {
+        throw new Error('Log in to email the code to recipients, or leave the recipients field empty.')
+      }
 
-      const maxRetrievals = recipientList.length > 0 ? recipientList.length : 1
+      const name = transferName || files[0].name
+      const code = generateCode()
+      const { kData, kIndex } = await deriveKeys(code)
+      const rHash = relayHash(kIndex)
 
-      // Upload
-      setStatus('uploading')
-      setProgress('Uploading encrypted shards to storage nodes...')
-      const uploadResult = await uploadTransfer(
-        transferName || files[0].name,
-        uploadFiles,
-        rHash,
-        encryptedManifest,
-        maxRetrievals,
-        setProgress
-      )
+      // Encrypt and upload each file one 64MB segment at a time, so files
+      // never have to fit in memory whole.
+      const usedPaths = new Set<string>()
+      const manifestFiles = []
+      let doneBytes = 0
+      for (const file of files) {
+        const hasher = fileHasher()
+        const segments: ManifestSegment[] = []
 
-      setResult({
-        code,
-        transferName: uploadResult.transfer_name,
-        files: uploadResult.files,
-        totalBytes: uploadResult.total_bytes,
+        for (let offset = 0, i = 0; offset < file.size; offset += SEGMENT_SIZE, i++) {
+          const pct = totalBytes ? Math.floor((doneBytes / totalBytes) * 100) : 0
+          setStatus('encrypting')
+          setProgress(`Encrypting ${file.name} (${pct}% overall)...`)
+          const plaintext = await file.slice(offset, offset + SEGMENT_SIZE).arrayBuffer()
+          hasher.update(plaintext)
+          const encrypted = await encryptSegment(kData, plaintext)
+
+          setStatus('uploading')
+          setProgress(`Uploading ${file.name} (${pct}% overall)...`)
+          const uploaded = await uploadSegment(encrypted)
+          segments.push({
+            id: `seg_${String(i).padStart(6, '0')}`,
+            original_size: plaintext.byteLength,
+            encrypted_size: uploaded.encrypted_size,
+            shards: uploaded.shards,
+          })
+          doneBytes += plaintext.byteLength
+        }
+
+        manifestFiles.push({
+          path: manifestPath(file.name, usedPaths),
+          size: file.size,
+          blake3: hasher.hexdigest(),
+          segments,
+        })
+      }
+
+      // Build and encrypt the manifest (same format as the CLI)
+      setProgress('Uploading manifest...')
+      const manifest = {
+        version: 1,
+        transfer_name: name,
+        total_bytes: totalBytes,
+        segment_size: SEGMENT_SIZE,
+        erasure_data_shards: 8,
+        erasure_parity_shards: 4,
+        files: manifestFiles,
+      }
+      const manifestJson = new TextEncoder().encode(JSON.stringify(manifest))
+      const encryptedManifest = await encryptSegment(kData, manifestJson.buffer as ArrayBuffer)
+
+      const { transfer_id } = await uploadManifest({
+        manifestHash: rHash,
+        manifestData: encryptedManifest,
+        maxRetrievals: Math.min(Math.max(recipientList.length, 1), MAX_RETRIEVALS),
+        transferName: name,
+        files: files.length,
+        totalBytes,
       })
 
+      setResult({ code, transferName: name, files: files.length, totalBytes })
+
       // Notify recipients if provided
-      if (recipientList.length > 0) {
+      if (recipientList.length > 0 && transfer_id) {
         setStatus('notifying')
         setProgress(`Sending notifications to ${recipientList.length} recipient(s)...`)
-        await notifyRecipients(code, transferName || files[0].name, recipientList, uploadResult.files, uploadResult.total_bytes)
+        await notifyRecipients(transfer_id, code, recipientList)
       }
 
       setStatus('done')
       setProgress('')
     } catch (err: any) {
       setStatus('error')
+      setProgress('')
       setErrorMsg(err.message || 'Upload failed')
     }
   }
@@ -214,8 +240,12 @@ export default function Upload() {
         value={recipients}
         onChange={(e) => setRecipients(e.target.value)}
         rows={2}
-        className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-4 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+        className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-1 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
       />
+      <p className="text-xs text-gray-500 mb-4">
+        Requires login. The code is emailed through this server, so the server and the recipients' mail
+        providers can see it. For the strongest privacy, leave this empty and share the code yourself.
+      </p>
 
       {/* Upload button */}
       <button

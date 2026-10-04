@@ -5,22 +5,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"net/mail"
 	"net/smtp"
+	"regexp"
 	"strings"
-	"time"
 )
 
 // NotifyRequest is the JSON body for the notify API.
 type NotifyRequest struct {
-	Code        string   `json:"code"`
+	TransferID   string   `json:"transfer_id"`
+	Code         string   `json:"code"`
 	TransferName string   `json:"transfer_name"`
-	Recipients  []string `json:"recipients"`
-	Files       int      `json:"files"`
-	TotalBytes  int64    `json:"total_bytes"`
+	Recipients   []string `json:"recipients"`
+	Files        int      `json:"files"`
+	TotalBytes   int64    `json:"total_bytes"`
 }
+
+const maxRecipientsPerRequest = 20
+
+// Transfer codes are six lowercase words joined by '-'. Anything else is
+// rejected so this endpoint can't be used to email arbitrary text.
+var codeRe = regexp.MustCompile(`^[a-z]+(-[a-z]+){5}$`)
 
 func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
@@ -35,54 +41,68 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var body NotifyRequest
+	req.Body = http.MaxBytesReader(w, req.Body, 64*1024)
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 
-	if body.Code == "" || len(body.Recipients) == 0 {
-		writeError(w, http.StatusBadRequest, "code and recipients required")
+	if !codeRe.MatchString(body.Code) {
+		writeError(w, http.StatusBadRequest, "invalid transfer code")
 		return
 	}
+	if len(body.Recipients) == 0 || len(body.Recipients) > maxRecipientsPerRequest {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("between 1 and %d recipients required", maxRecipientsPerRequest))
+		return
+	}
+	for _, r := range body.Recipients {
+		if !isValidEmail(r) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid email: %s", r))
+			return
+		}
+	}
+
+	// Only the sender of a transfer uploaded through this server can send
+	// notifications about it, and only so many per hour.
+	record, ok := s.db.GetTransfer(body.TransferID)
+	if !ok || record.SenderEmail != senderEmail {
+		writeError(w, http.StatusNotFound, "transfer not found")
+		return
+	}
+	if !s.notifyLimit.Allow(senderEmail, len(body.Recipients)) {
+		writeError(w, http.StatusTooManyRequests, "notification limit reached, try again later")
+		return
+	}
+
+	// Use the server's own record of the transfer, not the client's claims.
+	transferName := record.TransferName
+	files, totalBytes := record.Files, record.TotalBytes
+
+	s.db.SetRecipients(record.ID, senderEmail, body.Recipients)
 
 	if s.smtpConfig.Host == "" {
 		// Dev mode: log notifications
 		for _, r := range body.Recipients {
-			log.Printf("[DEV] Email to %s: Transfer '%s' code: %s", r, body.TransferName, body.Code)
+			log.Printf("[DEV] Email to %s: Transfer '%s' code: %s", r, transferName, body.Code)
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":   "logged",
-			"sent":     len(body.Recipients),
-			"message":  "SMTP not configured — emails logged to console",
+			"status":  "logged",
+			"sent":    len(body.Recipients),
+			"message": "SMTP not configured — emails logged to console",
 		})
 		return
 	}
 
 	sent := 0
-	var errors []string
+	errors := []string{}
 	for _, recipient := range body.Recipients {
-		if !isValidEmail(recipient) {
-			errors = append(errors, fmt.Sprintf("invalid email: %s", recipient))
-			continue
-		}
-		if err := sendTransferEmail(s.smtpConfig, recipient, body.Code, body.TransferName, senderEmail, body.Files, body.TotalBytes); err != nil {
+		if err := sendTransferEmail(s.smtpConfig, recipient, body.Code, transferName, senderEmail, files, totalBytes); err != nil {
 			log.Printf("Failed to send email to %s: %v", recipient, err)
 			errors = append(errors, fmt.Sprintf("failed: %s", recipient))
 			continue
 		}
 		sent++
 	}
-
-	// Save transfer record
-	s.db.SaveTransfer(&TransferRecord{
-		Code:         body.Code,
-		SenderEmail:  senderEmail,
-		Recipients:   body.Recipients,
-		TransferName: body.TransferName,
-		Files:        body.Files,
-		TotalBytes:   body.TotalBytes,
-		CreatedAt:    time.Now(),
-	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "ok",
@@ -225,4 +245,3 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-var _ = net.Dial

@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,10 +39,7 @@ func (d *DiskStore) Put(hash string, data io.Reader, ttl time.Duration) (int64, 
 
 	// Check if shard already exists (dedup)
 	if info, err := os.Stat(shardPath); err == nil {
-		d.mu.Lock()
-		d.shardIndex[hash] = time.Now().Add(ttl)
-		d.mu.Unlock()
-		return info.Size(), nil
+		return info.Size(), d.Touch(hash, ttl)
 	}
 
 	// Atomic write: write to temp file then rename
@@ -116,6 +114,19 @@ func (d *DiskStore) Exists(hash string) (int64, error) {
 	return info.Size(), nil
 }
 
+// Touch refreshes the shard's expiry. The file mtime records when the TTL
+// started, so expiries survive a restart (see rebuildIndex).
+func (d *DiskStore) Touch(hash string, ttl time.Duration) error {
+	now := time.Now()
+	if err := os.Chtimes(d.shardPath(hash), now, now); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.shardIndex[hash] = now.Add(ttl)
+	d.mu.Unlock()
+	return nil
+}
+
 func (d *DiskStore) UsedBytes() int64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -164,11 +175,20 @@ func (d *DiskStore) rebuildIndex(ttlSeconds int64) {
 		if err != nil {
 			return nil
 		}
-		if !info.IsDir() {
-			total += info.Size()
-			hash := filepath.Base(path)
-			d.shardIndex[hash] = time.Now().Add(time.Duration(ttlSeconds) * time.Second)
+		if info.IsDir() {
+			return nil
 		}
+		// Leftovers from an interrupted upload.
+		if strings.HasSuffix(path, ".tmp") {
+			os.Remove(path)
+			return nil
+		}
+		total += info.Size()
+		hash := filepath.Base(path)
+		// Expire relative to when the shard was stored (or last touched),
+		// not relative to the restart; otherwise every restart would grant
+		// every shard a fresh TTL.
+		d.shardIndex[hash] = info.ModTime().Add(time.Duration(ttlSeconds) * time.Second)
 		return nil
 	})
 	d.usedBytes = total

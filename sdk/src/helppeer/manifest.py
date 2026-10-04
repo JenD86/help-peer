@@ -1,8 +1,19 @@
 """Manifest building and parsing for Help Peer."""
-import os
+from __future__ import annotations
+
 import json
-from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+import os
+import re
+import sys
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+NONCE_SIZE = 12
+TAG_SIZE = 16
+# Largest segment size a receiver will accept, to bound memory use.
+MAX_SEGMENT_SIZE = 256 * 1024 * 1024
+
+_HEX_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass
@@ -25,6 +36,9 @@ class ManifestFile:
     path: str
     size: int
     segments: List[ManifestSegment] = field(default_factory=list)
+    # BLAKE3 of the whole plaintext file, checked by the receiver after
+    # reconstruction. Optional so manifests from older senders still parse.
+    blake3: Optional[str] = None
 
 
 @dataclass
@@ -38,6 +52,28 @@ class Manifest:
     files: List[ManifestFile] = field(default_factory=list)
 
     def to_json(self) -> bytes:
+        files = []
+        for f in self.files:
+            entry = {
+                "path": f.path,
+                "size": f.size,
+                "segments": [
+                    {
+                        "id": s.id,
+                        "original_size": s.original_size,
+                        "encrypted_size": s.encrypted_size,
+                        "shards": [
+                            {"index": sh.index, "hash": sh.hash, "node": sh.node}
+                            for sh in s.shards
+                        ],
+                    }
+                    for s in f.segments
+                ],
+            }
+            if f.blake3 is not None:
+                entry["blake3"] = f.blake3
+            files.append(entry)
+
         return json.dumps({
             "version": self.version,
             "transfer_name": self.transfer_name,
@@ -45,25 +81,7 @@ class Manifest:
             "segment_size": self.segment_size,
             "erasure_data_shards": self.erasure_data_shards,
             "erasure_parity_shards": self.erasure_parity_shards,
-            "files": [
-                {
-                    "path": f.path,
-                    "size": f.size,
-                    "segments": [
-                        {
-                            "id": s.id,
-                            "original_size": s.original_size,
-                            "encrypted_size": s.encrypted_size,
-                            "shards": [
-                                {"index": sh.index, "hash": sh.hash, "node": sh.node}
-                                for sh in s.shards
-                            ],
-                        }
-                        for s in f.segments
-                    ],
-                }
-                for f in self.files
-            ],
+            "files": files,
         }).encode("utf-8")
 
     @classmethod
@@ -78,7 +96,7 @@ class Manifest:
             erasure_parity_shards=d["erasure_parity_shards"],
         )
         for f in d["files"]:
-            mf = ManifestFile(path=f["path"], size=f["size"])
+            mf = ManifestFile(path=f["path"], size=f["size"], blake3=f.get("blake3"))
             for s in f["segments"]:
                 ms = ManifestSegment(
                     id=s["id"],
@@ -93,43 +111,101 @@ class Manifest:
             manifest.files.append(mf)
         return manifest
 
+    def validate(self) -> None:
+        """Check a received manifest is internally consistent before acting on
+        it. It comes from the sender, so sizes and indexes are untrusted and
+        would otherwise drive allocations, file offsets and list indexing."""
+        if self.version != 1:
+            raise ValueError(f"unsupported manifest version {self.version}")
+        k, m = self.erasure_data_shards, self.erasure_parity_shards
+        if not (isinstance(k, int) and isinstance(m, int) and k >= 1 and m >= 0 and k + m <= 256):
+            raise ValueError(f"invalid erasure coding {k}+{m}")
+        seg_size = self.segment_size
+        if not isinstance(seg_size, int) or not 0 < seg_size <= MAX_SEGMENT_SIZE:
+            raise ValueError(f"invalid segment size {seg_size}")
 
-def build_manifest(dir_path: str, transfer_name: str, segment_size: int) -> Manifest:
-    """Build a manifest by crawling a directory."""
-    manifest = Manifest(
-        transfer_name=transfer_name,
-        segment_size=segment_size,
-    )
+        total = 0
+        for f in self.files:
+            def bad(what: str) -> ValueError:
+                return ValueError(f"invalid manifest entry for {f.path!r}: {what}")
 
-    for root, dirs, files in os.walk(dir_path):
-        dirs.sort()
-        for filename in sorted(files):
-            filepath = os.path.join(root, filename)
-            rel_path = os.path.relpath(filepath, dir_path)
+            if not isinstance(f.size, int) or f.size < 0:
+                raise bad("invalid size")
+            total += f.size
+            if len(f.segments) != (f.size + seg_size - 1) // seg_size:
+                raise bad("wrong number of segments")
+            if f.blake3 is not None and not _HEX_HASH.match(f.blake3):
+                raise bad("invalid file hash")
 
-            size = os.path.getsize(filepath)
-            manifest.total_bytes += size
+            for i, seg in enumerate(f.segments):
+                if seg.original_size != min(seg_size, f.size - i * seg_size):
+                    raise bad("wrong segment size")
+                if seg.encrypted_size != seg.original_size + NONCE_SIZE + TAG_SIZE:
+                    raise bad("wrong encrypted segment size")
+                seen = set()
+                for sh in seg.shards:
+                    if not isinstance(sh.index, int) or not 0 <= sh.index < k + m or sh.index in seen:
+                        raise bad("invalid shard index")
+                    seen.add(sh.index)
+                    if not isinstance(sh.hash, str) or not _HEX_HASH.match(sh.hash):
+                        raise bad("invalid shard hash")
 
-            num_segments = 0
-            if size > 0:
-                num_segments = (size + segment_size - 1) // segment_size
+        if total != self.total_bytes:
+            raise ValueError("manifest total_bytes does not match its files")
 
-            segments = []
-            for i in range(num_segments):
-                seg_size = min(segment_size, size - i * segment_size)
-                segments.append(ManifestSegment(
-                    id=f"seg_{i:06d}",
-                    original_size=seg_size,
-                    encrypted_size=0,
-                ))
 
-            manifest.files.append(ManifestFile(
-                path=rel_path,
-                size=size,
-                segments=segments,
-            ))
+def _new_file_entry(rel_path: str, size: int, segment_size: int) -> ManifestFile:
+    num_segments = (size + segment_size - 1) // segment_size
+    segments = [
+        ManifestSegment(
+            id=f"seg_{i:06d}",
+            original_size=min(segment_size, size - i * segment_size),
+            encrypted_size=0,
+        )
+        for i in range(num_segments)
+    ]
+    return ManifestFile(path=rel_path, size=size, segments=segments)
 
-    return manifest
+
+def build_manifest(path: str, transfer_name: str, segment_size: int) -> Tuple[Manifest, str]:
+    """Build a manifest for a file or a directory.
+
+    Returns the manifest and the directory its paths are relative to.
+    """
+    manifest = Manifest(transfer_name=transfer_name, segment_size=segment_size)
+
+    if os.path.isfile(path):
+        base_dir = os.path.dirname(path) or "."
+        manifest.files.append(
+            _new_file_entry(os.path.basename(path), os.path.getsize(path), segment_size)
+        )
+    elif os.path.isdir(path):
+        base_dir = path
+        # os.walk doesn't descend into symlinked directories (which could loop
+        # or escape the tree), but symlinked files are followed and sent, e.g.
+        # Hugging Face cache snapshots that link to blobs.
+        for root, dirs, files in os.walk(path):
+            for d in dirs:
+                if os.path.islink(os.path.join(root, d)):
+                    print(f"warning: skipping symlinked directory {os.path.join(root, d)}",
+                          file=sys.stderr)
+            for filename in files:
+                filepath = os.path.join(root, filename)
+                if not os.path.isfile(filepath):
+                    print(f"warning: skipping {filepath} (broken symlink or special file)",
+                          file=sys.stderr)
+                    continue
+                # Manifest paths always use '/' so receivers on any OS parse them the same way.
+                rel_path = os.path.relpath(filepath, path).replace(os.sep, "/")
+                manifest.files.append(
+                    _new_file_entry(rel_path, os.path.getsize(filepath), segment_size)
+                )
+    else:
+        raise FileNotFoundError(f"no such file or directory: {path}")
+
+    manifest.files.sort(key=lambda f: f.path)
+    manifest.total_bytes = sum(f.size for f in manifest.files)
+    return manifest, base_dir
 
 
 def read_file_segment(filepath: str, segment_index: int, segment_size: int) -> bytes:
@@ -137,3 +213,21 @@ def read_file_segment(filepath: str, segment_index: int, segment_size: int) -> b
     with open(filepath, "rb") as f:
         f.seek(segment_index * segment_size)
         return f.read(segment_size)
+
+
+def safe_output_path(output_dir: str, rel_path: str) -> str:
+    """Resolve a manifest path under output_dir, rejecting anything that could
+    escape it. The manifest comes from the sender, who must not be able to
+    write outside the directory the receiver chose (e.g. "../../.bashrc" or
+    an absolute path, which os.path.join would otherwise honour)."""
+    if not rel_path:
+        raise ValueError(f"unsafe path in manifest: {rel_path!r}")
+
+    parts = rel_path.split("/")
+    for part in parts:
+        # Reject empty / dot segments, and anything another OS could treat
+        # as a separator, drive letter or special name.
+        if part in ("", ".", "..") or any(c in part for c in "\\:\0"):
+            raise ValueError(f"unsafe path in manifest: {rel_path!r}")
+
+    return os.path.join(output_dir, *parts)

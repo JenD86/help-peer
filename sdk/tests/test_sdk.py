@@ -34,12 +34,6 @@ class TestCrypto:
         assert h1 == h2
         assert len(h1) == 64  # 32 bytes hex
 
-    def test_hmac_verification(self):
-        k_data = b"\x00" * 32
-        shard = b"some shard data"
-        h = crypto.shard_hmac(k_data, shard)
-        assert crypto.verify_shard_hmac(k_data, shard, h)
-        assert not crypto.verify_shard_hmac(k_data, b"tampered", h)
 
 
 class TestErasure:
@@ -76,6 +70,14 @@ class TestErasure:
         reconstructed = erasure.decode_segment(shard_opts, len(data))
         assert data == reconstructed
 
+    def test_small_inputs_roundtrip(self):
+        for n in range(1, 64):
+            data = bytes(range(n))
+            shards = erasure.encode_segment(data)
+            shards[0] = None
+            shards[7] = None
+            assert erasure.decode_segment(shards, n) == data
+
     def test_decode_insufficient_shards(self):
         data = b"Too many missing shards!"
         shards = erasure.encode_segment(data)
@@ -90,14 +92,34 @@ class TestErasure:
 
 class TestManifest:
     def test_build_from_dir(self, tmp_path):
+        (tmp_path / "sub").mkdir()
         (tmp_path / "config.json").write_text("{}")
-        (tmp_path / "model.safetensors").write_text("weights")
+        (tmp_path / "sub" / "model.safetensors").write_text("weights")
 
-        m = manifest.build_manifest(str(tmp_path), "test-transfer", 67108864)
+        m, base = manifest.build_manifest(str(tmp_path), "test-transfer", 67108864)
+        assert base == str(tmp_path)
         assert m.transfer_name == "test-transfer"
         assert m.version == 1
-        assert len(m.files) == 2
-        assert m.total_bytes > 0
+        assert [f.path for f in m.files] == ["config.json", "sub/model.safetensors"]
+        assert m.total_bytes == 9
+
+    def test_build_single_file(self, tmp_path):
+        (tmp_path / "model.bin").write_bytes(b"abc")
+        (tmp_path / "unrelated.txt").write_text("not sent")
+
+        m, base = manifest.build_manifest(str(tmp_path / "model.bin"), "single", 67108864)
+        assert base == str(tmp_path)
+        assert [f.path for f in m.files] == ["model.bin"]
+        assert m.total_bytes == 3
+
+    def test_skips_symlinked_dirs(self, tmp_path):
+        (tmp_path / "real").mkdir()
+        (tmp_path / "real" / "w.bin").write_bytes(b"x")
+        (tmp_path / "loop").symlink_to(tmp_path)
+        (tmp_path / "link.bin").symlink_to(tmp_path / "real" / "w.bin")
+
+        m, _ = manifest.build_manifest(str(tmp_path), "t", 64)
+        assert [f.path for f in m.files] == ["link.bin", "real/w.bin"]
 
     def test_json_roundtrip(self):
         m = manifest.Manifest(
@@ -123,6 +145,43 @@ class TestManifest:
         assert restored.transfer_name == "test"
         assert len(restored.files) == 1
         assert restored.files[0].path == "test.txt"
+        assert restored.files[0].blake3 is None
+
+    def test_json_roundtrip_with_file_hash(self):
+        m = _valid_manifest()
+        m.files[0].blake3 = "ab" * 32
+        assert manifest.Manifest.from_json(m.to_json()).files[0].blake3 == "ab" * 32
+
+    def test_validate_accepts_consistent_manifest(self):
+        _valid_manifest().validate()
+
+    @pytest.mark.parametrize("mutate", [
+        lambda m: setattr(m, "total_bytes", 5),
+        lambda m: setattr(m, "segment_size", 0),
+        lambda m: setattr(m, "erasure_data_shards", 0),
+        lambda m: m.files[0].segments.pop(),
+        lambda m: setattr(m.files[0].segments[1], "original_size", 1),
+        lambda m: setattr(m.files[0].segments[0], "encrypted_size", 1 << 40),
+        lambda m: m.files[0].segments[0].shards.append(manifest.ManifestShard(12, "ab" * 32, "n")),
+        lambda m: m.files[0].segments[0].shards.extend(
+            [manifest.ManifestShard(1, "ab" * 32, "n"), manifest.ManifestShard(1, "ab" * 32, "n")]),
+        lambda m: setattr(m.files[0], "blake3", "zz"),
+    ])
+    def test_validate_rejects_inconsistent_manifests(self, mutate):
+        m = _valid_manifest()
+        mutate(m)
+        with pytest.raises(ValueError):
+            m.validate()
+
+
+def _valid_manifest():
+    return manifest.Manifest(
+        transfer_name="t", total_bytes=100, segment_size=64,
+        files=[manifest.ManifestFile(path="a", size=100, segments=[
+            manifest.ManifestSegment(id="seg_000000", original_size=64, encrypted_size=92),
+            manifest.ManifestSegment(id="seg_000001", original_size=36, encrypted_size=64),
+        ])],
+    )
 
 
 class TestValidator:
@@ -158,3 +217,67 @@ class TestValidator:
 
         v = reg.validator_for("config.json")
         assert len(v.file_extensions()) == 0  # fallback
+
+
+class TestTransferCode:
+    def test_normalize_code(self):
+        assert crypto.normalize_code(" Orbit  velvet-ZOOM ") == "orbit-velvet-zoom"
+        assert crypto.derive_keys("Orbit Velvet") == crypto.derive_keys("orbit-velvet")
+
+    def test_generate_code_format(self):
+        from helppeer import client
+        words = client._wordlist()
+        assert len(words) == 7776
+        code = client._generate_code()
+        parts = code.split("-")
+        assert len(parts) == client.CODE_WORDS
+        assert all(p in words for p in parts)
+        assert code != client._generate_code()
+
+
+class TestSafeOutputPath:
+    def test_accepts_nested(self):
+        assert manifest.safe_output_path("/tmp/out", "sub/dir/model.safetensors") == \
+            os.path.join("/tmp/out", "sub", "dir", "model.safetensors")
+
+    @pytest.mark.parametrize("bad", [
+        "", "../evil", "a/../../evil", "/etc/passwd", "a//b", "./a", "a/.",
+        "..\\evil", "C:evil", "a\0b",
+    ])
+    def test_rejects_escapes(self, bad):
+        with pytest.raises(ValueError):
+            manifest.safe_output_path("/tmp/out", bad)
+
+
+VECTORS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "protocol", "test-vectors.json")
+
+
+@pytest.mark.skipif(not os.path.exists(VECTORS_PATH), reason="not running from the repo")
+class TestSharedVectors:
+    """Vectors shared with the Rust client and Go web backend."""
+
+    def setup_method(self):
+        with open(VECTORS_PATH) as f:
+            self.v = json.load(f)
+
+    def test_key_derivation(self):
+        kd = self.v["key_derivation"]
+        for code in [kd["code"], *kd["equivalent_inputs"]]:
+            k_data, k_index = crypto.derive_keys(code)
+            assert k_data.hex() == kd["k_data"]
+            assert k_index.hex() == kd["k_index"]
+            assert crypto.relay_hash(k_index) == kd["relay_hash"]
+
+    def test_erasure(self):
+        e = self.v["erasure"]
+        data = bytes.fromhex(e["data"])
+        shards = erasure.encode_segment(data, e["data_shards"], e["parity_shards"])
+        assert [s.hex() for s in shards] == e["shards"]
+        assert [crypto.content_hash(s) for s in shards] == e["shard_blake3"]
+
+        # Rebuild from parity-heavy subsets
+        for missing in ([0, 1, 2, 3], [4, 5, 6, 7], [1, 3, 8, 11]):
+            partial = [bytes.fromhex(s) for s in e["shards"]]
+            for i in missing:
+                partial[i] = None
+            assert erasure.decode_segment(partial, len(data)) == data

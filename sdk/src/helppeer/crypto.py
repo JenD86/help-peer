@@ -1,7 +1,8 @@
 """Cryptographic operations for Help Peer."""
+from __future__ import annotations
 import os
+import re
 import struct
-import hmac
 import hashlib
 import hkdf
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -10,9 +11,15 @@ NONCE_SIZE = 12
 KEY_SIZE = 32
 
 
+def normalize_code(code: str) -> str:
+    """Canonicalize a typed-in code so "Apple Banana", " apple-banana " and
+    "APPLE-BANANA" all derive the same keys."""
+    return "-".join(w.lower() for w in re.split(r"[-\s]+", code) if w)
+
+
 def derive_keys(code: str) -> tuple[bytes, bytes]:
     """Derive K_data and K_index from a transfer code using HKDF-SHA256."""
-    ikm = code.encode("utf-8")
+    ikm = normalize_code(code).encode("utf-8")
     k_data = hkdf.Hkdf(None, ikm, hashlib.sha256).expand(b"help-peer-data-key", KEY_SIZE)
     k_index = hkdf.Hkdf(None, ikm, hashlib.sha256).expand(b"help-peer-index-key", KEY_SIZE)
     return k_data, k_index
@@ -46,14 +53,3 @@ def content_hash(data: bytes) -> str:
     """Compute BLAKE3 hash of data, return hex string."""
     import blake3
     return blake3.blake3(data).hexdigest()
-
-
-def shard_hmac(k_data: bytes, shard: bytes) -> bytes:
-    """Compute HMAC-SHA256 of shard data."""
-    return hmac.new(k_data, shard, hashlib.sha256).digest()
-
-
-def verify_shard_hmac(k_data: bytes, shard: bytes, expected: bytes) -> bool:
-    """Verify shard HMAC."""
-    actual = shard_hmac(k_data, shard)
-    return hmac.compare_digest(actual, expected)

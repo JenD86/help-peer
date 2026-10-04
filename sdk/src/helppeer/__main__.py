@@ -1,2 +1,4 @@
-[project.scripts]
-helppeer = "helppeer.cli:main"
+"""Allow `python -m helppeer`."""
+from .cli import main
+
+main()

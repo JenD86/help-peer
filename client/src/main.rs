@@ -1,6 +1,7 @@
 mod crypto;
 mod download;
 mod erasure;
+mod http;
 mod manifest;
 mod upload;
 mod validator;
@@ -42,7 +43,7 @@ enum Commands {
     },
     /// Receive a file or directory using a code
     Receive {
-        /// The transfer code (e.g., 7-orbit-velvet)
+        /// The transfer code (e.g., orbit-velvet-zoom-candle-harbor-ember)
         code: String,
 
         /// Output directory
@@ -77,14 +78,16 @@ async fn main() {
                 relay_url: cli.relay.clone(),
             };
 
-            match upload::upload_directory(&path, &name, &config).await {
-                Ok((code, _relay_hash)) => {
+            match upload::upload_path(&path, &name, &config).await {
+                Ok((code, manifest)) => {
                     if cli.json {
                         let json = serde_json::json!({
                             "status": "ok",
                             "code": code,
                             "transfer_name": name,
                             "path": path.display().to_string(),
+                            "files": manifest.files.len(),
+                            "total_bytes": manifest.total_bytes,
                         });
                         println!("{}", serde_json::to_string_pretty(&json).unwrap());
                     } else {
@@ -120,19 +123,26 @@ async fn main() {
             }
 
             match download::download_transfer(&code, &output, &cli.relay).await {
-                Ok(manifest) => {
+                Ok(result) => {
+                    let manifest = result.manifest;
                     if cli.json {
-                        let file_hashes: Vec<_> = manifest.files.iter()
-                            .map(|f| serde_json::json!({
-                                "path": f.path,
-                                "size": f.size,
-                            }))
+                        let files: Vec<_> = manifest
+                            .files
+                            .iter()
+                            .zip(&result.file_hashes)
+                            .map(|(f, (_, hash))| {
+                                serde_json::json!({
+                                    "path": f.path,
+                                    "size": f.size,
+                                    "blake3": hash,
+                                })
+                            })
                             .collect();
                         let json = serde_json::json!({
                             "status": "ok",
                             "transfer_name": manifest.transfer_name,
                             "total_bytes": manifest.total_bytes,
-                            "files": file_hashes,
+                            "files": files,
                         });
                         println!("{}", serde_json::to_string_pretty(&json).unwrap());
                     } else {
@@ -143,7 +153,10 @@ async fn main() {
                         println!("  Files: {}", manifest.files.len());
                         println!("  Total size: {} bytes", manifest.total_bytes);
                         println!();
-                        println!("  File hashes (BLAKE3):");
+                        println!("  File hashes (BLAKE3, verified against sender):");
+                        for (path, hash) in &result.file_hashes {
+                            println!("  {} → {}", path, hash);
+                        }
                     }
                 }
                 Err(e) => {

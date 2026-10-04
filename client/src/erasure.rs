@@ -14,7 +14,10 @@ pub fn encode_segment(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 
     // Fill data shards
     for i in 0..DATA_SHARDS {
-        let start = i * shard_size;
+        // For small inputs the trailing shards can start past the end of the
+        // data (e.g. 34 bytes -> 5-byte shards, shard 7 starts at 35); they
+        // are then pure padding.
+        let start = std::cmp::min(i * shard_size, data.len());
         let end = std::cmp::min(start + shard_size, data.len());
         let mut shard = Vec::with_capacity(shard_size);
         shard.extend_from_slice(&data[start..end]);
@@ -128,6 +131,20 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_small_inputs() {
+        // Every length up to a few shards' worth, including ones where the
+        // last data shards are entirely padding.
+        for len in 1..64 {
+            let data: Vec<u8> = (0..len as u8).collect();
+            let shards = encode_segment(&data).unwrap();
+            let mut shard_opts: Vec<Option<Vec<u8>>> = shards.into_iter().map(Some).collect();
+            shard_opts[0] = None;
+            shard_opts[7] = None;
+            assert_eq!(decode_segment(shard_opts, len).unwrap(), data, "len {}", len);
+        }
+    }
+
+    #[test]
     fn test_decode_insufficient_shards() {
         let data = b"Too many missing shards!";
         let shards = encode_segment(data).unwrap();
@@ -142,5 +159,26 @@ mod tests {
 
         let result = decode_segment(shard_opts, data.len());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_shared_vectors() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../protocol/test-vectors.json")).unwrap();
+        let e = &v["erasure"];
+        let data = hex::decode(e["data"].as_str().unwrap()).unwrap();
+        let expected: Vec<String> = e["shards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+
+        let shards = encode_segment(&data).unwrap();
+        let got: Vec<String> = shards.iter().map(hex::encode).collect();
+        assert_eq!(got, expected);
+        for (shard, h) in shards.iter().zip(e["shard_blake3"].as_array().unwrap()) {
+            assert_eq!(crate::crypto::content_hash(shard), h.as_str().unwrap());
+        }
     }
 }

@@ -2,7 +2,6 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
 use blake3;
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
 
@@ -11,12 +10,15 @@ pub const DATA_SHARDS: usize = 8;
 pub const PARITY_SHARDS: usize = 4;
 pub const TOTAL_SHARDS: usize = DATA_SHARDS + PARITY_SHARDS;
 pub const NONCE_SIZE: usize = 12;
+pub const TAG_SIZE: usize = 16;
 pub const KEY_SIZE: usize = 32;
 
-/// Derive K_data and K_index from a shared secret (the PAKE code).
-/// In the MVP, the shared secret IS the code itself.
-/// In production, this would come from SPAKE2 key exchange.
+/// Derive K_data and K_index from the transfer code.
+/// Sender and receiver are never online together, so there is no PAKE: the
+/// code itself is the shared secret, and its entropy is the whole security
+/// margin (see upload::CODE_WORDS).
 pub fn derive_keys(code: &str) -> (Vec<u8>, Vec<u8>) {
+    let code = normalize_code(code);
     let ikm = code.as_bytes();
     let h = Hkdf::<Sha256>::new(None, ikm);
 
@@ -27,6 +29,16 @@ pub fn derive_keys(code: &str) -> (Vec<u8>, Vec<u8>) {
     h.expand(b"help-peer-index-key", &mut k_index).unwrap();
 
     (k_data.to_vec(), k_index.to_vec())
+}
+
+/// Canonicalize a typed-in code so "Apple Banana", " apple-banana " and
+/// "APPLE-BANANA" all derive the same keys.
+pub fn normalize_code(code: &str) -> String {
+    code.split(|c: char| c == '-' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Compute the relay hash from K_index: BLAKE3(K_index) hex-encoded
@@ -70,20 +82,6 @@ pub fn decrypt_segment(k_data: &[u8], encrypted: &[u8]) -> Result<Vec<u8>, Strin
         .map_err(|e| format!("decryption failed: {}", e))
 }
 
-/// Compute HMAC-SHA256 of shard data for integrity verification.
-pub fn shard_hmac(k_data: &[u8], shard: &[u8]) -> Vec<u8> {
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(k_data).unwrap();
-    mac.update(shard);
-    mac.finalize().into_bytes().to_vec()
-}
-
-/// Verify shard HMAC.
-pub fn verify_shard_hmac(k_data: &[u8], shard: &[u8], expected_hmac: &[u8]) -> bool {
-    let actual = shard_hmac(k_data, shard);
-    actual.as_slice() == expected_hmac
-}
-
 /// Compute BLAKE3 hash of data, return hex string.
 pub fn content_hash(data: &[u8]) -> String {
     hex::encode(blake3::hash(data).as_bytes())
@@ -114,6 +112,12 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_code() {
+        assert_eq!(normalize_code(" Orbit  velvet-ZOOM "), "orbit-velvet-zoom");
+        assert_eq!(derive_keys("Orbit Velvet"), derive_keys("orbit-velvet"));
+    }
+
+    #[test]
     fn test_relay_hash_consistency() {
         let (_, k_index) = derive_keys("7-orbit-velvet");
         let h1 = relay_hash(&k_index);
@@ -123,11 +127,17 @@ mod tests {
     }
 
     #[test]
-    fn test_hmac_verification() {
-        let k_data = vec![0u8; 32];
-        let shard = b"some shard data";
-        let hmac = shard_hmac(&k_data, shard);
-        assert!(verify_shard_hmac(&k_data, shard, &hmac));
-        assert!(!verify_shard_hmac(&k_data, b"tampered", &hmac));
+    fn test_shared_vectors() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../protocol/test-vectors.json")).unwrap();
+        let kd = &v["key_derivation"];
+        let mut inputs = vec![kd["code"].as_str().unwrap()];
+        inputs.extend(kd["equivalent_inputs"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()));
+        for code in inputs {
+            let (k_data, k_index) = derive_keys(code);
+            assert_eq!(hex::encode(&k_data), kd["k_data"].as_str().unwrap(), "{:?}", code);
+            assert_eq!(hex::encode(&k_index), kd["k_index"].as_str().unwrap());
+            assert_eq!(relay_hash(&k_index), kd["relay_hash"].as_str().unwrap());
+        }
     }
 }

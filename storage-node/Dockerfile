@@ -3,7 +3,6 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY store.go disk_store.go s3_store.go main.go ./
 RUN CGO_ENABLED=0 go build -o storage-node .
 
 FROM alpine:3.18

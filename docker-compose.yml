@@ -36,6 +36,11 @@ services:
       - WEB_PORT=8080
       - RELAY_URL=http://relay:7000
       - STORAGE_NODES=http://storage-node:7001
+      # How clients outside Docker reach the same node; written into manifests
+      # so the CLI can receive transfers sent from the web UI.
+      - STORAGE_NODES_PUBLIC=http://127.0.0.1:7001
+      # Public URL for login links; set WEB_BASE_URL in .env for a real deployment
+      - WEB_BASE_URL=${WEB_BASE_URL:-http://localhost:8080}
       - WEB_DATA_DIR=/data
     env_file:
       - .env

@@ -19,7 +19,7 @@ print(f"Transfer code: {code}")
 # Share this code with the recipient. Data lives for 24 hours.
 
 # Receive a transfer
-helppeer.receive("38-vortex-xenon", output_dir="./received")
+helppeer.receive("orbit-velvet-zoom-candle-harbor-ember", output_dir="./received")
 ```
 
 ## Configuration
@@ -45,13 +45,13 @@ import json
 
 # Send and get structured result
 result = helppeer.send("./model-weights", name="my-model", return_details=True)
-# result = {"code": "38-vortex-xenon", "transfer_name": "my-model", "files": 4, "total_bytes": 1056}
+# result = {"code": "orbit-velvet-zoom-candle-harbor-ember", "transfer_name": "my-model", "files": 4, "total_bytes": 1056}
 
 # Receive with progress callback
 def on_progress(file_path, segment, total_segments):
     print(f"  {file_path}: {segment}/{total_segments} segments")
 
-helppeer.receive("38-vortex-xenon", output_dir="./received", progress=on_progress)
+helppeer.receive("orbit-velvet-zoom-candle-harbor-ember", output_dir="./received", progress=on_progress)
 ```
 
 ## CLI
@@ -60,5 +60,14 @@ The SDK also installs a `helppeer` CLI:
 
 ```bash
 helppeer send ./my-model --name "Llama-3-70B"
-helppeer receive 38-vortex-xenon --output ./received
+helppeer send ./model.safetensors          # single files work too
+helppeer receive orbit-velvet-zoom-candle-harbor-ember --output ./received
+
+# Global flags go before the subcommand
+helppeer --relay https://relay.example.com --nodes https://n1.example.com,https://n2.example.com,https://n3.example.com send ./my-model
+helppeer --json receive orbit-velvet-zoom-candle-harbor-ember   # machine-readable output
 ```
+
+`python -m helppeer` works the same way.
+
+Transfers are fully compatible with the Rust CLI and the web UI: a code from any of them can be received with any other. Every shard and every received file is checked against its BLAKE3 hash.
