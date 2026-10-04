@@ -19,6 +19,8 @@ pub struct DownloadResult {
     pub acknowledged: bool,
     /// The transfer's relay key (used to clear it from the user's inbox).
     pub relay_hash: String,
+    /// Segments reused from a previous, interrupted attempt.
+    pub resumed_segments: usize,
 }
 
 /// Download and reconstruct a transfer using a code.
@@ -120,6 +122,7 @@ pub async fn download_transfer(
         file_hashes.push((file.path.clone(), hash));
     }
 
+    let resumed_segments = progress.previously_done();
     progress.remove();
 
     // Everything verified: confirm, which uses up this recipient's retrieval.
@@ -139,6 +142,7 @@ pub async fn download_transfer(
         file_hashes,
         acknowledged: ack.is_ok(),
         relay_hash,
+        resumed_segments,
     })
 }
 

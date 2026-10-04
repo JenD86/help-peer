@@ -1,0 +1,49 @@
+# Help Peer
+
+> Asynchronous, end-to-end encrypted transfer of large files (model weights, datasets, checkpoints). The sender uploads and gets a one-time code; the receiver downloads with the code later. Neither has to be online at the same time. Transfers expire 24 hours after sending.
+
+Use the command-line client (`helppeer`) or the Python SDK. Both are non-interactive and have identical JSON output. Full reference: https://github.com/JenD86/help-peer#for-ai-agents
+
+## Setup
+
+- Install: `pip install helppeer` (CLI + Python SDK).
+- Log in to this website so the client uses its relay and storage nodes and can send to usernames: `helppeer login --server <this site's URL> --token <API token>`. A human creates the token on this site's /account page; it is shown once.
+- Without a login, set `HELPEER_RELAY_URL` and `HELPEER_STORAGE_NODES` (comma-separated). This site's values are at `GET /api/config`.
+- Use `HELPEER_CONFIG=/path/config.json` to keep separate logins per agent.
+
+## Commands
+
+- `helppeer --json send <path> [--name <name>] [--to alice,bob@example.com]` → `{"status":"ok","code","transfer_name","path","files","total_bytes","recipients","notify_errors"}`
+- `helppeer --json receive <code> [--output <dir>]` → `{"status":"ok","transfer_name","total_bytes","files":[{"path","size","blake3"}],"acknowledged","resumed_segments"}`
+- `helppeer --json cancel <code>` → `{"status":"ok","transfer_name","shards_deleted","shards_already_gone","shards_failed"}`
+- `helppeer --json inbox` (needs login) → `{"status":"ok","items":[{"id","code","transfer_name","files","total_bytes","sender_username","sender_email","created_at","expires_at"}]}`
+- `helppeer --json login --server <url> --token <token>` / `helppeer --json logout`
+
+## Output contract
+
+- With `--json`, stdout is exactly one JSON object; progress and warnings go to stderr.
+- Exit 0 with `"status":"ok"` on success; exit 1 with `{"status":"error","error":"<message>"}` on failure; exit 2 for invalid arguments.
+
+## Rules
+
+- The code is the only key: whoever has it can download or cancel the transfer. Share it only with the intended recipient and keep it out of logs.
+- `receive` is safe to retry with the same code and `--output`: it resumes, and the transfer is only consumed after every file is verified (BLAKE3).
+- `send` is not idempotent: every run creates a new transfer and code.
+- `cancel` is final. Transfers expire 24 hours after sending.
+- `--to` accepts usernames (`alice` or `@alice`, delivered to their inbox on this site with an email alert) and email addresses (sent the code by email). It requires login; unknown usernames fail before uploading.
+
+## Python SDK
+
+```python
+import helppeer
+info = helppeer.send("./model-dir", name="run-42", to=["alice"], return_details=True)
+result = helppeer.receive(info["code"], output_dir="./model-dir")   # result["file_list"] = [{path, size, blake3}]
+helppeer.cancel(info["code"])
+helppeer.login(server_url, token); helppeer.inbox()
+```
+
+Errors raise exceptions. `receive()` also resumes interrupted downloads.
+
+## Storage nodes
+
+Encrypted shards wait on storage nodes run by this site and volunteers. To contribute one, see https://github.com/JenD86/help-peer#storage-nodes

@@ -16,7 +16,8 @@ pub struct CancelResult {
     pub shards_deleted: usize,
     /// Already expired or deleted.
     pub shards_already_gone: usize,
-    /// Couldn't be deleted (e.g. node unreachable); they expire with the TTL.
+    /// Couldn't be deleted (node unreachable, or identical data shared with
+    /// another transfer, which keeps its own delete token); they expire with the TTL.
     pub shards_failed: usize,
 }
 

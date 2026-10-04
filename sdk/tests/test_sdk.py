@@ -378,3 +378,16 @@ class TestServerResolution:
         from helppeer.config import resolve_servers, DEFAULT_RELAY, DEFAULT_NODES
         self._set(monkeypatch, None, None, None)
         assert resolve_servers() == (DEFAULT_RELAY, DEFAULT_NODES)
+
+
+class TestCLIParsing:
+    def test_global_options_work_before_or_after_subcommand(self):
+        from helppeer.cli import build_parser
+        p = build_parser()
+        a = p.parse_args(["--json", "--relay", "http://r", "receive", "code"])
+        assert (a.json, a.relay, a.nodes) == (True, "http://r", None)
+        a = p.parse_args(["receive", "code", "--json", "--nodes", "http://n1,http://n2"])
+        assert (a.json, a.relay, a.nodes) == (True, None, "http://n1,http://n2")
+        # A value given before the subcommand isn't reset by the subcommand's copy.
+        a = p.parse_args(["--relay", "http://r", "send", "./x"])
+        assert a.relay == "http://r" and a.json is False

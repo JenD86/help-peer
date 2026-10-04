@@ -157,7 +157,9 @@ def receive(
         progress: Optional callback(file_path, segment_index, total_segments).
 
     Returns:
-        Dict with transfer details: transfer_name, files, total_bytes, file_hashes.
+        Dict with transfer_name, files (count), total_bytes, file_hashes
+        ({path: blake3}), file_list ([{path, size, blake3}]), acknowledged
+        and resumed_segments.
     """
     relay_url, _ = resolve_servers()
     k_data, k_index = crypto.derive_keys(code)
@@ -262,6 +264,9 @@ def receive(
         "files": len(manifest.files),
         "total_bytes": manifest.total_bytes,
         "file_hashes": file_hashes,
+        "file_list": [
+            {"path": f.path, "size": f.size, "blake3": file_hashes[f.path]} for f in manifest.files
+        ],
         "acknowledged": acknowledged,
         "resumed_segments": resumed,
     }

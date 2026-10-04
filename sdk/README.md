@@ -2,6 +2,8 @@
 
 A Python SDK for asynchronously sharing large file dumps (AI model weights) via the Help Peer network.
 
+**Agents:** every CLI command takes `--json` (one JSON object on stdout, exit code 0/1), and `receive` is safe to retry. The output fields and retry rules are in the [main README](https://github.com/JenD86/help-peer#for-ai-agents).
+
 ## Installation
 
 ```bash

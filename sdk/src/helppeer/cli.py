@@ -6,40 +6,56 @@ import sys
 from . import send, receive, cancel, configure, login, logout, inbox
 
 
-def main():
+def _add_global_options(p, **default):
+    p.add_argument("--relay", **default,
+                   help="Relay server URL (default: $HELPEER_RELAY_URL, then the logged-in site's)")
+    p.add_argument("--nodes", **default,
+                   help="Storage node URLs, comma-separated (default: $HELPEER_STORAGE_NODES, then the site's)")
+    p.add_argument("--json", action="store_true", **default,
+                   help="Machine-readable JSON on stdout (diagnostics go to stderr)")
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="helppeer",
         description="Asynchronous ephemeral file transfer for AI model weights",
     )
-    parser.add_argument("--relay", default=None, help="Relay server URL")
-    parser.add_argument("--nodes", default=None, help="Storage node URLs (comma-separated)")
-    parser.add_argument("--json", action="store_true",
-                        help="Machine-readable JSON output for agents/scripts")
+    _add_global_options(parser)
+    # The same options on every subcommand, so they also work after it (like
+    # the Rust CLI): `helppeer receive CODE --json`. Their default is SUPPRESS
+    # so they don't overwrite a value given before the subcommand.
+    common = argparse.ArgumentParser(add_help=False)
+    _add_global_options(common, default=argparse.SUPPRESS)
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    send_cmd = sub.add_parser("send", help="Send a file or directory")
+    send_cmd = sub.add_parser("send", parents=[common], help="Send a file or directory")
     send_cmd.add_argument("path", help="Path to send")
     send_cmd.add_argument("--name", default="untitled-transfer", help="Transfer name")
     send_cmd.add_argument("--to", help="Recipients, comma-separated: usernames (alice or @alice) get it in "
                                        "their inbox, emails get the code by email. Needs `login`.")
 
-    recv_cmd = sub.add_parser("receive", help="Receive a transfer")
+    recv_cmd = sub.add_parser("receive", parents=[common], help="Receive a transfer")
     recv_cmd.add_argument("code", help="Transfer code (e.g., orbit-velvet-zoom-candle-harbor-ember)")
     recv_cmd.add_argument("--output", default="./received", help="Output directory")
 
-    cancel_cmd = sub.add_parser("cancel", help="Cancel a transfer before it expires")
+    cancel_cmd = sub.add_parser("cancel", parents=[common], help="Cancel a transfer before it expires")
     cancel_cmd.add_argument("code", help="Transfer code")
 
-    sub.add_parser("inbox", help="List transfers sent to your username (needs `login`)")
+    sub.add_parser("inbox", parents=[common], help="List transfers sent to your username (needs `login`)")
 
-    login_cmd = sub.add_parser("login", help="Log in to a Help Peer website with an API token "
+    login_cmd = sub.add_parser("login", parents=[common], help="Log in to a Help Peer website with an API token "
                                              "(create one on its Account page)")
     login_cmd.add_argument("--server", required=True, help="Website URL, e.g. https://helppeer.example.com")
     login_cmd.add_argument("--token", required=True, help="API token (hp_...)")
 
-    sub.add_parser("logout", help="Forget the saved login")
+    sub.add_parser("logout", parents=[common], help="Forget the saved login")
 
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     # CLI flags override HELPEER_* environment variables
@@ -93,7 +109,15 @@ def _receive(args):
     result = receive(args.code, output_dir=args.output)
 
     if args.json:
-        print(json.dumps({"status": "ok", **result}, indent=2))
+        # Same shape as the Rust CLI's output.
+        print(json.dumps({
+            "status": "ok",
+            "transfer_name": result["transfer_name"],
+            "total_bytes": result["total_bytes"],
+            "files": result["file_list"],
+            "acknowledged": result["acknowledged"],
+            "resumed_segments": result["resumed_segments"],
+        }, indent=2))
         return
     print("✓ Download complete!")
     print()
@@ -116,7 +140,8 @@ def _cancel(args):
     print(f"  Deleted {result['shards_deleted']} shards "
           f"({result['shards_already_gone']} had already expired or been deleted)")
     if result["shards_failed"]:
-        print(f"  {result['shards_failed']} shards could not be deleted (node unreachable); "
+        print(f"  {result['shards_failed']} shards could not be deleted (node unreachable, or the same "
+              "data is shared with another transfer); "
               "they expire within 24 hours")
 
 

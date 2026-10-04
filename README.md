@@ -4,6 +4,80 @@ A free, decentralized system for asynchronously sharing large file dumps — mai
 
 Think "Wormhole meets BitTorrent, but the sender can leave."
 
+It's built to be driven by **AI agents** as much as by people: every command is non-interactive, has a `--json` mode with a stable output shape, and is safe to retry where it matters. Agents should start with [For AI Agents](#for-ai-agents). Want to help? [Run a storage node](#storage-nodes).
+
+## For AI Agents
+
+**Install** one client (both have the same commands and JSON output):
+
+```bash
+pip install helppeer           # Python CLI + SDK, or `pip install ./sdk` from this repo
+cargo install --path client    # Rust CLI, from this repo
+```
+
+**Point it at a deployment.** Either log in to a Help Peer website (it supplies its relay and storage nodes), or set them directly:
+
+```bash
+helppeer login --server https://helppeer.example.com --token "$HELPEER_TOKEN"   # token from the site's Account page
+# or
+export HELPEER_RELAY_URL=https://relay.example.com
+export HELPEER_STORAGE_NODES=https://n1.example.com,https://n2.example.com,https://n3.example.com
+```
+
+Set `HELPEER_CONFIG=/path/to/config.json` to give each agent its own login. With nothing configured, the clients use a local stack (`docker compose up`).
+
+**Commands**
+
+```bash
+helppeer --json send ./model-dir --name "llama-3-8b-finetune"   # upload; prints the transfer code
+helppeer --json receive <code> --output ./model-dir              # download, verify, resume if interrupted
+helppeer --json cancel <code>                                    # withdraw a transfer and delete its data
+helppeer --json send ./model-dir --to alice,ops@example.com      # also deliver it (needs login)
+helppeer --json inbox                                            # transfers sent to your username (needs login)
+```
+
+**Output contract**
+
+- With `--json` (before or after the subcommand), stdout is exactly one JSON object. Progress and warnings go to stderr.
+- Success: exit code `0` and `"status": "ok"`. Failure: exit code `1` and `{"status": "error", "error": "<message>"}`. Invalid arguments: exit code `2`, usage on stderr.
+
+| Command | Fields besides `status` |
+|---|---|
+| `send` | `code`, `transfer_name`, `path`, `files` (count), `total_bytes`, `recipients`, `notify_errors` (list of strings) |
+| `receive` | `transfer_name`, `total_bytes`, `files` (list of `{path, size, blake3}`), `acknowledged`, `resumed_segments` |
+| `cancel` | `transfer_name`, `shards_deleted`, `shards_already_gone`, `shards_failed` |
+| `inbox` | `items`: list of `{id, code, transfer_name, files, total_bytes, sender_username, sender_email, created_at, expires_at, manifest_hash}` |
+| `login` | `server`, `email`, `username`, `config` |
+| `logout` | `was_logged_in` |
+
+**Behaviour to rely on**
+
+- **The code is the only key.** Anyone holding it can download the transfer until it's received, or cancel it. Give it only to the intended recipient and keep it out of logs.
+- **`receive` is safe to retry.** Run the same command again (same `--output`) after any failure and it resumes. A transfer is only used up once every file has been verified, so a failed attempt never loses it. `acknowledged: false` means the files are fine but the relay couldn't be told; the transfer then just expires.
+- **`receive` verifies everything.** Each shard and each whole file is checked against BLAKE3 hashes from the sender; `files[].blake3` lets you compare with a hash you already know.
+- **`send` is not idempotent.** Each run uploads a new transfer with a new code. If it fails, run it again; partial uploads expire on their own.
+- **`cancel` is final**, and **transfers expire 24 hours after sending.**
+- **Recipients:** `--to` takes usernames (`alice` or `@alice`, delivered to their inbox on the site) and email addresses (sent the code by email), and needs `helppeer login`. Unknown usernames fail before anything is uploaded.
+- **Storage:** a transfer takes 1.5× its size across storage nodes (erasure coding), for up to 24 hours.
+
+**Python SDK** — the same operations as functions; failures raise exceptions:
+
+```python
+import helppeer
+
+info = helppeer.send("./model-dir", name="llama-3-8b-finetune", to=["alice"], return_details=True)
+# {"code": "...", "transfer_name": ..., "files": 4, "total_bytes": ..., "recipients": [...], "notify_errors": []}
+
+result = helppeer.receive(info["code"], output_dir="./model-dir")
+# {"transfer_name", "files" (count), "total_bytes", "file_hashes" {path: blake3},
+#  "file_list" [{path, size, blake3}], "acknowledged", "resumed_segments"}
+
+helppeer.cancel(info["code"])         # {"transfer_name", "shards_deleted", "shards_already_gone", "shards_failed"}
+helppeer.login(server_url, token)     # then send(to=...) and helppeer.inbox() work
+```
+
+Every Help Peer website also serves this guide in compact form at `/llms.txt`.
+
 ## How It Works
 
 1. **Sender** runs `helppeer send ./my-model/` and gets a code like `orbit-velvet-zoom-candle-harbor-ember`
@@ -171,6 +245,8 @@ Once logged in, the CLI and SDK use the website's relay and storage nodes unless
 
 ### Multiple Storage Nodes
 
+(To contribute a node to someone else's deployment, see [Storage Nodes](#storage-nodes).)
+
 ```bash
 # Start multiple storage nodes on different ports
 STORAGE_PORT=7001 STORAGE_DIR=/tmp/node1 ./storage-node/storage-node &
@@ -183,6 +259,31 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 Shards are assigned round-robin, so the number of nodes decides how many node failures a transfer survives: with 3+ nodes each holds at most 4 of a segment's 12 shards, so any one node can be lost; with 12+ nodes any four can. Clients warn when fewer than 3 nodes are configured.
 
 If a node fails while sending, its shards are stored on the remaining nodes instead (with a warning, since the transfer then tolerates fewer node failures).
+
+## Storage Nodes
+
+**What they are.** A storage node is a small HTTP server (`storage-node/`) that holds encrypted pieces of transfers ("shards") for up to 24 hours, so the sender can go offline. Every 64 MB of a transfer is encrypted and erasure-coded into 12 shards of about 8 MB (8 data + 4 parity); any 8 rebuild it. Senders spread the 12 shards across all the nodes they know about, so the more independent nodes a deployment has, the more node failures each transfer survives.
+
+**What an operator can see.** Only ciphertext shards, each named by its own BLAKE3 hash, plus the IP addresses that connect. Not file names, contents, transfer codes or keys — shards are useless without the code, which never reaches a node. Nodes reject any upload whose content doesn't match its hash, and shards can only be deleted early with a token from the encrypted manifest.
+
+**What it costs.** Disk and bandwidth. A node keeps each shard for `STORAGE_TTL` (24 hours by default) and serves it to the receiver, usually once. Transfers use 1.5× their size across all nodes. `STORAGE_CAPACITY` caps how much a node stores; when it's full it refuses new shards (HTTP 507) and senders move those shards to other nodes.
+
+### Contributing a node
+
+1. **Find a machine** with a public address, spare disk and decent upload bandwidth. Put the node behind HTTPS (for example a Caddy or nginx reverse proxy in front of port 7001).
+2. **Run it** — e.g. with 100 GB of capacity:
+   ```bash
+   docker run -d --restart unless-stopped -p 7001:7001 -v helppeer-shards:/data \
+     -e STORAGE_CAPACITY=107374182400 \
+     $(docker build -q ./storage-node)
+   ```
+   Or use any S3-compatible bucket (AWS S3, Cloudflare R2, Backblaze B2, MinIO) with `STORAGE_BACKEND=s3`; see [Configuration](#storage-node).
+3. **Check it:** `curl https://node.example.com/health` reports capacity, usage and shard count.
+4. **Share the URL.** Nodes aren't discovered automatically yet (DHT discovery is on the [roadmap](#roadmap)). Give your node's URL to the operator of a Help Peer site, who adds it to `STORAGE_NODES` (and `STORAGE_NODES_PUBLIC`), or to people who send with `--nodes` / `HELPEER_STORAGE_NODES`.
+
+**Being a good node:** stay up for at least 24 hours after your last upload so those transfers can finish; keep the same data volume across restarts (expiry times survive restarts); and leave some free disk beyond `STORAGE_CAPACITY`. Erasure coding tolerates nodes going away, but every node that disappears reduces the margin for everyone.
+
+**For site operators:** list at least 3 nodes so a transfer survives losing any one of them (with 12 or more, any four). Contributed nodes are added by appending their URLs to `STORAGE_NODES` in the same order as `STORAGE_NODES_PUBLIC`.
 
 ## Architecture
 
@@ -199,7 +300,7 @@ If a node fails while sending, its shards are stored on the remaining nodes inst
 ```
 
 - **Relay Server** (Go): Stores encrypted manifests indexed by `BLAKE3(K_index)` until receivers confirm or they expire. Never sees plaintext.
-- **Storage Node** (Go): Stores encrypted shards with TTL. Zero-knowledge — cannot decrypt shard contents.
+- **Storage Node** (Go): Stores encrypted shards with TTL. Zero-knowledge — cannot decrypt shard contents. Anyone can run one; see [Storage Nodes](#storage-nodes).
 - **Client** (Rust): Handles key derivation from the transfer code, AES-256-GCM encryption, Reed-Solomon erasure coding (8+4), manifest building, upload/download, and file validation.
 - **Python SDK**: Pure Python implementation of the full protocol (with numpy for fast erasure coding). `pip install helppeer` — zero external binaries required. Includes CLI, programmatic API, and agent-friendly structured output.
 - **Web** (React + Go): The browser derives keys and encrypts; the Go backend erasure-codes ciphertext, talks to the relay and storage nodes, and handles login and email notifications.

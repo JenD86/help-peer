@@ -265,6 +265,7 @@ async fn main() {
                     "total_bytes": manifest.total_bytes,
                     "files": files,
                     "acknowledged": result.acknowledged,
+                    "resumed_segments": result.resumed_segments,
                 }),
                 || {
                     println!();
@@ -303,7 +304,7 @@ async fn main() {
                     );
                     if r.shards_failed > 0 {
                         println!(
-                            "  {} shards could not be deleted (node unreachable); they expire within 24 hours",
+                            "  {} shards could not be deleted (node unreachable, or the same data is shared with another transfer); they expire within 24 hours",
                             r.shards_failed
                         );
                     }
