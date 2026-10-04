@@ -36,12 +36,46 @@ cd client && cargo build --release
 
 ### Run Servers
 
+**Option 1: Docker Compose (easiest)**
+```bash
+docker compose up -d
+# Relay on :7000, storage node on :7001
+```
+
+**Option 2: Docker (individual containers)**
+```bash
+# Relay server
+docker run -d -p 7000:7000 -v relay-data:/data \
+  $(docker build -q ./relay)
+
+# Storage node (local disk)
+docker run -d -p 7001:7001 -v storage-data:/data \
+  -e STORAGE_DIR=/data -e STORAGE_CAPACITY=1073741824 \
+  $(docker build -q ./storage-node)
+
+# Storage node (S3 backend — works with AWS S3, MinIO, R2, B2)
+docker run -d -p 7001:7001 \
+  -e STORAGE_BACKEND=s3 \
+  -e S3_BUCKET=my-helppeer-bucket \
+  -e S3_REGION=us-east-1 \
+  -e S3_ENDPOINT=https://s3.amazonaws.com \
+  -e S3_ACCESS_KEY=AKIA... \
+  -e S3_SECRET_KEY=... \
+  -e STORAGE_CAPACITY=10737418240 \
+  $(docker build -q ./storage-node)
+```
+
+**Option 3: Bare metal**
 ```bash
 # Start relay server (default port 7000)
 RELAY_DIR=/tmp/helppeer-relay ./relay/relay-server
 
 # Start storage node (default port 7001, 1GB capacity)
 STORAGE_DIR=/tmp/helppeer-storage STORAGE_CAPACITY=1073741824 ./storage-node/storage-node
+
+# Storage node with S3 backend
+STORAGE_BACKEND=s3 S3_BUCKET=my-bucket S3_ACCESS_KEY=... S3_SECRET_KEY=... \
+  ./storage-node/storage-node
 ```
 
 ### Transfer Files
@@ -140,9 +174,16 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 | Env Var | Default | Description |
 |---|---|---|
 | `STORAGE_PORT` | `7001` | Listen port |
-| `STORAGE_DIR` | `/tmp/helppeer-storage` | Data directory for shards |
+| `STORAGE_BACKEND` | `disk` | Storage backend: `disk` or `s3` |
+| `STORAGE_DIR` | `/tmp/helppeer-storage` | Data directory for shards (disk backend) |
 | `STORAGE_CAPACITY` | `1073741824` (1GB) | Max storage capacity in bytes |
 | `STORAGE_TTL` | `86400` (24h) | Shard TTL in seconds |
+| `S3_BUCKET` | — | S3 bucket name (s3 backend) |
+| `S3_REGION` | `us-east-1` | S3 region (s3 backend) |
+| `S3_ENDPOINT` | — | S3 endpoint URL for MinIO/R2/B2 (s3 backend) |
+| `S3_ACCESS_KEY` | — | S3 access key (s3 backend) |
+| `S3_SECRET_KEY` | — | S3 secret key (s3 backend) |
+| `S3_PREFIX` | `shards` | Key prefix in bucket (s3 backend) |
 
 ### Client
 
@@ -165,12 +206,18 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 help-peer/
 ├── architecture_guide_ai_model_adaptation.md  # Full architecture document
 ├── protocol/SPEC.md                           # Wire protocol specification
+├── docker-compose.yml                          # One-command local deployment
 ├── relay/                                     # Relay server (Go)
 │   ├── go.mod
-│   └── main.go
+│   ├── main.go
+│   └── Dockerfile
 ├── storage-node/                              # Storage node (Go)
 │   ├── go.mod
-│   └── main.go
+│   ├── main.go                                # HTTP server + backend selection
+│   ├── store.go                               # ShardStore interface
+│   ├── disk_store.go                          # Local filesystem backend
+│   ├── s3_store.go                            # S3-compatible backend (S3, R2, MinIO, B2)
+│   └── Dockerfile
 ├── client/                                    # Client (Rust)
 │   ├── Cargo.toml
 │   └── src/
