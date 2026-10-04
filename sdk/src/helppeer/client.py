@@ -21,7 +21,7 @@ from . import crypto
 from . import erasure
 from .manifest import (
     Manifest, ManifestSegment, ManifestShard,
-    build_manifest, read_file_segment, safe_output_path,
+    MAX_MESSAGE_CHARS, build_manifest, read_file_segment, safe_output_path,
 )
 from .resume import ResumeLog
 from .validator import ValidatorRegistry
@@ -35,6 +35,7 @@ def send(
     name: str = "untitled-transfer",
     *,
     to: Optional[List[str]] = None,
+    message: Optional[str] = None,
     return_details: bool = False,
 ) -> Union[str, Dict[str, Any]]:
     """Send a file or directory. Returns the transfer code.
@@ -45,12 +46,19 @@ def send(
         to: Optional recipients. Usernames ("alice" or "@alice") get the
             transfer in their inbox on the website; email addresses get the
             code by email. Requires helppeer.login().
+        message: Optional note describing the transfer (up to 2000
+            characters). Recipients see it with the files, in their inbox and
+            in notification emails.
         return_details: If True, return a dict with full transfer details.
 
     Returns:
         Transfer code string (e.g., "orbit-velvet-zoom-candle-harbor-ember"), or a dict if return_details=True.
     """
     config = get_config()
+    if message is not None and not message.strip():
+        message = None
+    if message is not None and len(message) > MAX_MESSAGE_CHARS:
+        raise ValueError(f"message is longer than {MAX_MESSAGE_CHARS} characters")
     recipients = [r.strip() for r in (to or []) if r.strip()]
     api = current_api()
     # Check recipients before uploading anything.
@@ -76,6 +84,7 @@ def send(
     manifest.erasure_parity_shards = config.parity_shards
     manifest.ack_secret = crypto.new_secret()
     manifest.delete_token = crypto.new_secret()
+    manifest.message = message
     uploader = _ShardUploader(storage_nodes, crypto.secret_hash(manifest.delete_token))
 
     with _session() as session, ThreadPoolExecutor(max_workers=total_shards) as pool:
@@ -124,7 +133,7 @@ def send(
     notify_errors: List[str] = []
     if recipients:
         try:
-            result = api.notify(r_hash, code, name, len(manifest.files), manifest.total_bytes, recipients)
+            result = api.notify(r_hash, code, name, message, len(manifest.files), manifest.total_bytes, recipients)
             notify_errors = list(result.get("errors") or [])
         except Exception as e:
             notify_errors = [f"couldn't notify recipients ({e}); share the code yourself"]
@@ -261,6 +270,7 @@ def receive(
 
     return {
         "transfer_name": manifest.transfer_name,
+        "message": manifest.message,
         "files": len(manifest.files),
         "total_bytes": manifest.total_bytes,
         "file_hashes": file_hashes,
@@ -269,6 +279,27 @@ def receive(
         ],
         "acknowledged": acknowledged,
         "resumed_segments": resumed,
+    }
+
+
+def info(code: str) -> Dict[str, Any]:
+    """Preview a transfer without downloading or consuming it.
+
+    Returns:
+        Dict with transfer_name, message (or None), total_bytes and
+        files ([{path, size}]).
+    """
+    relay_url, _ = resolve_servers()
+    k_data, k_index = crypto.derive_keys(code)
+    with _session() as session:
+        encrypted_manifest = _download_manifest(session, relay_url, crypto.relay_hash(k_index))
+    manifest = Manifest.from_json(crypto.decrypt_segment(k_data, encrypted_manifest))
+    manifest.validate()
+    return {
+        "transfer_name": manifest.transfer_name,
+        "message": manifest.message,
+        "total_bytes": manifest.total_bytes,
+        "files": [{"path": f.path, "size": f.size} for f in manifest.files],
     }
 
 

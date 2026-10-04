@@ -23,6 +23,7 @@ type InboxItem struct {
 	SenderEmail    string    `json:"sender_email"`
 	SenderUsername string    `json:"sender_username,omitempty"`
 	TransferName   string    `json:"transfer_name"`
+	Message        string    `json:"message,omitempty"`
 	Files          int       `json:"files"`
 	TotalBytes     int64     `json:"total_bytes"`
 	Code           string    `json:"code"`
@@ -436,12 +437,18 @@ func (s *Server) registerTransferHandler(w http.ResponseWriter, req *http.Reques
 	var body struct {
 		ManifestHash string `json:"manifest_hash"`
 		TransferName string `json:"transfer_name"`
+		Message      string `json:"message"`
 		Files        int    `json:"files"`
 		TotalBytes   int64  `json:"total_bytes"`
 	}
 	req.Body = http.MaxBytesReader(w, req.Body, 4096)
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || !isHexHash(body.ManifestHash) {
 		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	message, err := cleanMessage(body.Message)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Only real transfers on our relay can be registered.
@@ -453,6 +460,7 @@ func (s *Server) registerTransferHandler(w http.ResponseWriter, req *http.Reques
 		ID:           generateToken(16),
 		SenderEmail:  email,
 		TransferName: truncate(body.TransferName, maxNameLength),
+		Message:      message,
 		Files:        body.Files,
 		TotalBytes:   body.TotalBytes,
 		CreatedAt:    time.Now(),

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/klauspost/reedsolomon"
@@ -173,6 +174,7 @@ type ManifestUploadRequest struct {
 	AckHash       string `json:"ack_hash"`      // BLAKE3 of the manifest's ack secret
 	MaxRetrievals int    `json:"max_retrievals"`
 	TransferName  string `json:"transfer_name"`
+	Message       string `json:"message"`
 	Files         int    `json:"files"`
 	TotalBytes    int64  `json:"total_bytes"`
 }
@@ -209,6 +211,11 @@ func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request)
 		writeError(w, http.StatusBadRequest, "empty manifest")
 		return
 	}
+	message, err := cleanMessage(body.Message)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if body.MaxRetrievals == 0 {
 		body.MaxRetrievals = 1
 	}
@@ -236,6 +243,7 @@ func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request)
 			ID:           generateToken(16),
 			SenderEmail:  email,
 			TransferName: truncate(body.TransferName, maxNameLength),
+			Message:      message,
 			Files:        body.Files,
 			TotalBytes:   body.TotalBytes,
 			CreatedAt:    time.Now(),
@@ -244,6 +252,25 @@ func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request)
 		resp["transfer_id"] = record.ID
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+const maxMessageChars = 2000
+
+var errMessageTooLong = fmt.Errorf("message is longer than %d characters", maxMessageChars)
+
+// cleanMessage validates a sender's note and drops control characters other
+// than newlines and tabs, since it ends up in emails and on other people's
+// screens.
+func cleanMessage(msg string) (string, error) {
+	if utf8.RuneCountInString(msg) > maxMessageChars {
+		return "", errMessageTooLong
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			return r
+		}
+		return -1
+	}, strings.TrimSpace(msg)), nil
 }
 
 // truncate shortens s to at most n bytes without splitting a UTF-8 character.

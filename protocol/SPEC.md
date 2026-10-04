@@ -306,6 +306,7 @@ The manifest is a JSON object created by the sender, encrypted with `K_data` (AE
 | `transfer_name` | string | Human-readable name for the transfer |
 | `ack_secret` | string | Random 32 bytes, hex; presented to the relay to confirm the download (1.3) |
 | `delete_token` | string | Random 32 bytes, hex; authorizes deleting the transfer's shards (2.3) |
+| `message` | string (optional) | Sender's note describing the transfer, up to 2000 characters. Untrusted text: receivers must strip control characters before printing it to a terminal |
 | `total_bytes` | u64 | Total size of all files combined |
 | `segment_size` | u32 | Segment size in bytes (default 67108864 = 64MB) |
 | `erasure_data_shards` | u8 | Number of data shards per segment (default 8) |

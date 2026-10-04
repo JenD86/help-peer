@@ -129,6 +129,7 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 			SenderEmail:    senderEmail,
 			SenderUsername: sender.Username,
 			TransferName:   record.TransferName,
+			Message:        record.Message,
 			Files:          record.Files,
 			TotalBytes:     record.TotalBytes,
 			Code:           body.Code,
@@ -138,10 +139,10 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 		})
 		inboxed++
 		if s.smtpConfig.Host == "" {
-			log.Printf("[DEV] Inbox alert to %s (@%s): transfer '%s' from %s", email, name, record.TransferName, senderName)
+			log.Printf("[DEV] Inbox alert to %s (@%s): transfer '%s' from %s, message: %q", email, name, record.TransferName, senderName, record.Message)
 			continue
 		}
-		if err := sendInboxAlertEmail(s.smtpConfig, email, s.auth.baseURL, senderName, record.TransferName, record.Files, record.TotalBytes); err != nil {
+		if err := sendInboxAlertEmail(s.smtpConfig, email, s.auth.baseURL, senderName, record.TransferName, record.Message, record.Files, record.TotalBytes); err != nil {
 			log.Printf("Failed to send inbox alert to %s: %v", email, err)
 			errors = append(errors, fmt.Sprintf("alert email failed for @%s (the transfer is still in their inbox)", name))
 		}
@@ -149,11 +150,11 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 
 	for _, recipient := range emails {
 		if s.smtpConfig.Host == "" {
-			log.Printf("[DEV] Email to %s: Transfer '%s' code: %s", recipient, record.TransferName, body.Code)
+			log.Printf("[DEV] Email to %s: Transfer '%s' message: %q code: %s", recipient, record.TransferName, record.Message, body.Code)
 			sent++
 			continue
 		}
-		if err := sendTransferEmail(s.smtpConfig, recipient, body.Code, record.TransferName, senderName, record.Files, record.TotalBytes); err != nil {
+		if err := sendTransferEmail(s.smtpConfig, recipient, body.Code, record.TransferName, record.Message, senderName, record.Files, record.TotalBytes); err != nil {
 			log.Printf("Failed to send email to %s: %v", recipient, err)
 			errors = append(errors, fmt.Sprintf("failed: %s", recipient))
 			continue
@@ -206,7 +207,7 @@ This link expires in 15 minutes. If you didn't request this, you can safely igno
 	return sendEmail(smtpCfg, to, subject, body)
 }
 
-func sendInboxAlertEmail(smtpCfg *SMTPConfig, to, baseURL, senderName, transferName string, files int, totalBytes int64) error {
+func sendInboxAlertEmail(smtpCfg *SMTPConfig, to, baseURL, senderName, transferName, message string, files int, totalBytes int64) error {
 	subject := fmt.Sprintf("Help Peer — %s sent you files", senderName)
 	body := fmt.Sprintf(`Hello,
 
@@ -215,19 +216,19 @@ func sendInboxAlertEmail(smtpCfg *SMTPConfig, to, baseURL, senderName, transferN
   Transfer: %s
   Files: %d
   Size: %s
-
+%s
 They're waiting in your inbox (log in to see them):
 
   %s/inbox
 
 The transfer expires in 24 hours.
 
-— Help Peer`, senderName, transferName, files, formatBytes(totalBytes), baseURL)
+— Help Peer`, senderName, transferName, files, formatBytes(totalBytes), emailMessageBlock(senderName, message), baseURL)
 
 	return sendEmail(smtpCfg, to, subject, body)
 }
 
-func sendTransferEmail(smtpCfg *SMTPConfig, to, code, transferName, senderEmail string, files int, totalBytes int64) error {
+func sendTransferEmail(smtpCfg *SMTPConfig, to, code, transferName, message, senderEmail string, files int, totalBytes int64) error {
 	subject := fmt.Sprintf("Help Peer — %s sent you files", senderEmail)
 	body := fmt.Sprintf(`Hello,
 
@@ -237,12 +238,25 @@ func sendTransferEmail(smtpCfg *SMTPConfig, to, code, transferName, senderEmail 
   Files: %d
   Size: %s
   Code: %s
-
+%s
 To download, go to Help Peer and enter the code above.
 
-— Help Peer`, senderEmail, transferName, files, formatBytes(totalBytes), code)
+— Help Peer`, senderEmail, transferName, files, formatBytes(totalBytes), code, emailMessageBlock(senderEmail, message))
 
 	return sendEmail(smtpCfg, to, subject, body)
+}
+
+// emailMessageBlock formats the sender's note for an email body, quoted so
+// it's clearly the sender's words rather than Help Peer's.
+func emailMessageBlock(sender, message string) string {
+	if message == "" {
+		return ""
+	}
+	lines := strings.Split(message, "\n")
+	for i, l := range lines {
+		lines[i] = "  > " + l
+	}
+	return fmt.Sprintf("\nMessage from %s:\n\n%s\n", sender, strings.Join(lines, "\n"))
 }
 
 func sendEmail(smtpCfg *SMTPConfig, to, subject, body string) error {

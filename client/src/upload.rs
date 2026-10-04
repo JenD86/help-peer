@@ -13,6 +13,8 @@ use crate::manifest::{self, Manifest, ManifestShard};
 pub struct UploadConfig {
     pub storage_nodes: Vec<String>,
     pub relay_url: String,
+    /// Optional note for the recipients, carried in the encrypted manifest.
+    pub message: Option<String>,
 }
 
 /// Upload a file or directory to the network.
@@ -47,6 +49,7 @@ pub async fn upload_path(
     // Build the initial manifest (without shard info)
     let (mut manifest, base_dir) = Manifest::build(path, transfer_name)?;
     let segment_size = manifest.segment_size as usize;
+    manifest.message = config.message.clone().filter(|m| !m.trim().is_empty());
     manifest.ack_secret = crypto::new_secret();
     manifest.delete_token = crypto::new_secret();
     let delete_token_hash = crypto::secret_hash(&manifest.delete_token);

@@ -64,6 +64,7 @@ export async function uploadManifest(params: {
   manifestHash: string
   manifestData: ArrayBuffer
   ackHash: string
+  message?: string
   maxRetrievals: number
   transferName: string
   files: number
@@ -73,6 +74,7 @@ export async function uploadManifest(params: {
     manifest_hash: params.manifestHash,
     manifest_data: arrayBufferToBase64(params.manifestData),
     ack_hash: params.ackHash,
+    message: params.message ?? '',
     max_retrievals: params.maxRetrievals,
     transfer_name: params.transferName,
     files: params.files,
@@ -171,6 +173,7 @@ export interface InboxItem {
   sender_username?: string
   sender_email: string
   transfer_name: string
+  message?: string
   files: number
   total_bytes: number
   code: string

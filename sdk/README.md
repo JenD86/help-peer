@@ -62,7 +62,8 @@ The SDK also installs a `helppeer` CLI:
 
 ```bash
 helppeer send ./my-model --name "Llama-3-70B"
-helppeer send ./model.safetensors          # single files work too
+helppeer send ./model.safetensors --message "Checkpoint from step 12k"   # single file, with a note
+helppeer info orbit-velvet-zoom-candle-harbor-ember   # preview name, message and files without downloading
 helppeer receive orbit-velvet-zoom-candle-harbor-ember --output ./received
 helppeer cancel orbit-velvet-zoom-candle-harbor-ember   # withdraw a transfer before it expires
 

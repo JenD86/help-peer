@@ -17,6 +17,10 @@ pub struct Manifest {
     /// Hex token that authorizes deleting this transfer's shards from
     /// storage nodes (they only store its BLAKE3).
     pub delete_token: String,
+    /// Optional note from the sender describing the transfer. Optional so
+    /// manifests from older senders still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     pub total_bytes: u64,
     pub segment_size: u32,
     pub erasure_data_shards: u8,
@@ -49,6 +53,9 @@ pub struct ManifestShard {
     pub hash: String,
     pub node: String,
 }
+
+/// Longest message a sender may attach, in characters.
+pub const MAX_MESSAGE_CHARS: usize = 2000;
 
 /// Largest segment size a receiver will accept, to bound memory use.
 const MAX_SEGMENT_SIZE: usize = 256 * 1024 * 1024;
@@ -84,6 +91,7 @@ impl Manifest {
             transfer_name: transfer_name.to_string(),
             ack_secret: String::new(),  // filled during upload
             delete_token: String::new(), // filled during upload
+            message: None,
             total_bytes: files.iter().map(|f| f.size).sum(),
             segment_size: crypto::SEGMENT_SIZE as u32,
             erasure_data_shards: crypto::DATA_SHARDS as u8,
@@ -112,6 +120,9 @@ impl Manifest {
         }
         if !is_hex_hash(&self.ack_secret) || !is_hex_hash(&self.delete_token) {
             return Err("manifest has an invalid ack secret or delete token".into());
+        }
+        if self.message.as_ref().map_or(false, |m| m.chars().count() > MAX_MESSAGE_CHARS) {
+            return Err("manifest message is too long".into());
         }
         if self.erasure_data_shards as usize != crypto::DATA_SHARDS
             || self.erasure_parity_shards as usize != crypto::PARITY_SHARDS
@@ -238,6 +249,12 @@ fn crawl_dir(root: &Path, current: &Path, files: &mut Vec<ManifestFile>) -> Resu
     Ok(())
 }
 
+/// Make sender-supplied text safe to print to a terminal: drop control
+/// characters (which could inject escape sequences) except newlines and tabs.
+pub fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
+}
+
 /// Resolve a manifest path under `output_dir`, rejecting anything that could
 /// escape it. The manifest comes from the sender, who must not be able to
 /// write outside the directory the receiver chose (e.g. `../../.bashrc` or
@@ -336,6 +353,7 @@ mod tests {
             transfer_name: "t".into(),
             ack_secret: "cd".repeat(32),
             delete_token: "ef".repeat(32),
+            message: None,
             total_bytes: 100,
             segment_size: 64,
             erasure_data_shards: 8,
@@ -350,6 +368,21 @@ mod tests {
                 ],
             }],
         }
+    }
+
+    #[test]
+    fn test_message_roundtrip() {
+        let mut m = valid_manifest();
+        assert!(!String::from_utf8(m.to_json().unwrap()).unwrap().contains("\"message\""));
+        m.message = Some("Fine-tuned on run 42.\nUse tokenizer v3.".into());
+        let back = Manifest::from_json(&m.to_json().unwrap()).unwrap();
+        assert_eq!(back.message, m.message);
+        back.validate().unwrap();
+    }
+
+    #[test]
+    fn test_printable_strips_escape_sequences() {
+        assert_eq!(printable("hi\x1b[2Jthere\nline 2\ttab\u{7}"), "hi[2Jthere\nline 2\ttab");
     }
 
     #[test]
@@ -373,6 +406,7 @@ mod tests {
             ("version", Box::new(|m| m.version = 1)),
             ("ack secret", Box::new(|m| m.ack_secret = String::new())),
             ("delete token", Box::new(|m| m.delete_token = "x".into())),
+            ("message", Box::new(|m| m.message = Some("x".repeat(MAX_MESSAGE_CHARS + 1)))),
         ];
         for (name, mutate) in cases {
             let mut m = valid_manifest();
@@ -416,6 +450,7 @@ mod tests {
             transfer_name: "test".into(),
             ack_secret: "cd".repeat(32),
             delete_token: "ef".repeat(32),
+            message: None,
             total_bytes: 100,
             segment_size: 67108864,
             erasure_data_shards: 8,

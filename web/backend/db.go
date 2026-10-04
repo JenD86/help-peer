@@ -61,6 +61,7 @@ type TransferRecord struct {
 	SenderEmail  string    `json:"sender_email"`
 	Recipients   []string  `json:"recipients"`
 	TransferName string    `json:"transfer_name"`
+	Message      string    `json:"message,omitempty"` // sender's note, shown to recipients
 	Files        int       `json:"files"`
 	TotalBytes   int64     `json:"total_bytes"`
 	CreatedAt    time.Time `json:"created_at"`

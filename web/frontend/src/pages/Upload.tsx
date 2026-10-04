@@ -7,6 +7,7 @@ import {
 
 const SEGMENT_SIZE = 64 * 1024 * 1024 // 64MB
 const MAX_RETRIEVALS = 100
+const MAX_MESSAGE_CHARS = 2000
 
 interface ManifestSegment {
   id: string
@@ -36,6 +37,7 @@ export default function Upload() {
   const [files, setFiles] = useState<File[]>([])
   const [transferName, setTransferName] = useState('')
   const [recipients, setRecipients] = useState('')
+  const [message, setMessage] = useState('')
   const [userQuery, setUserQuery] = useState('')
   const [userResults, setUserResults] = useState<string[]>([])
 
@@ -170,9 +172,11 @@ export default function Upload() {
 
       // Build and encrypt the manifest (same format as the CLI)
       setProgress('Uploading manifest...')
+      const note = message.trim()
       const manifest = {
         version: 2,
         transfer_name: name,
+        ...(note ? { message: note } : {}),
         ack_secret: ackSecret,
         delete_token: deleteToken,
         total_bytes: totalBytes,
@@ -188,6 +192,7 @@ export default function Upload() {
         manifestHash: rHash,
         manifestData: encryptedManifest,
         ackHash: secretHash(ackSecret),
+        message: note,
         maxRetrievals: Math.min(Math.max(recipientList.length, 1), MAX_RETRIEVALS),
         transferName: name,
         files: files.length,
@@ -272,6 +277,7 @@ export default function Upload() {
               setCancelMsg('')
               setFiles([])
               setRecipients('')
+              setMessage('')
             }}
             className="text-indigo-600 hover:text-indigo-700 font-medium"
           >
@@ -326,6 +332,19 @@ export default function Upload() {
         onChange={(e) => setTransferName(e.target.value)}
         className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-4 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
       />
+
+      {/* Message */}
+      <textarea
+        placeholder="Message to recipients (optional): what's in this transfer, how to use it..."
+        value={message}
+        onChange={(e) => setMessage(e.target.value.slice(0, MAX_MESSAGE_CHARS))}
+        rows={3}
+        className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-1 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+      />
+      <p className="text-xs text-gray-500 mb-4 flex justify-between">
+        <span>Shown to recipients with the files, in their inbox and in notification emails.</span>
+        <span>{message.length}/{MAX_MESSAGE_CHARS}</span>
+      </p>
 
       {/* Recipients */}
       <textarea

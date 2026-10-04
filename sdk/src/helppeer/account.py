@@ -78,11 +78,11 @@ class Api:
     def username_exists(self, username: str) -> bool:
         return bool(self._call("GET", f"/api/users/lookup?username={quote(username)}").get("exists"))
 
-    def notify(self, relay_hash: str, code: str, transfer_name: str, files: int,
-               total_bytes: int, recipients: List[str]) -> Dict[str, Any]:
+    def notify(self, relay_hash: str, code: str, transfer_name: str, message: Optional[str],
+               files: int, total_bytes: int, recipients: List[str]) -> Dict[str, Any]:
         """Register a transfer sent from here, then notify recipients."""
         reg = self._call("POST", "/api/transfers", {
-            "manifest_hash": relay_hash, "transfer_name": transfer_name,
+            "manifest_hash": relay_hash, "transfer_name": transfer_name, "message": message,
             "files": files, "total_bytes": total_bytes,
         })
         return self._call("POST", "/api/notify", {

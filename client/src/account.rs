@@ -138,6 +138,7 @@ impl Api {
         relay_hash: &str,
         code: &str,
         transfer_name: &str,
+        message: Option<&str>,
         files: usize,
         total_bytes: u64,
         recipients: &[String],
@@ -149,6 +150,7 @@ impl Api {
                 Some(json!({
                     "manifest_hash": relay_hash,
                     "transfer_name": transfer_name,
+                    "message": message,
                     "files": files,
                     "total_bytes": total_bytes,
                 })),

@@ -54,6 +54,11 @@ enum Commands {
         /// their inbox, email addresses get the code by email. Needs `login`.
         #[arg(long)]
         to: Option<String>,
+
+        /// A note describing the transfer (up to 2000 characters). Recipients
+        /// see it with the files, in their inbox and in notification emails.
+        #[arg(long)]
+        message: Option<String>,
     },
     /// Receive a file or directory using a code
     Receive {
@@ -63,6 +68,11 @@ enum Commands {
         /// Output directory
         #[arg(long, default_value = "./received")]
         output: PathBuf,
+    },
+    /// Show a transfer's name, message and files without downloading it
+    Info {
+        /// The transfer code
+        code: String,
     },
     /// Cancel a transfer before it expires, deleting it from the relay and storage nodes
     Cancel {
@@ -119,6 +129,16 @@ impl Output {
     }
 }
 
+/// Print the sender's message, indented, with control characters removed.
+fn print_message(message: Option<&str>) {
+    if let Some(msg) = message.filter(|m| !m.trim().is_empty()) {
+        println!("  Message from sender:");
+        for line in manifest::printable(msg).lines() {
+            println!("    │ {}", line);
+        }
+    }
+}
+
 fn split_list(s: &str) -> Vec<String> {
     s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
 }
@@ -159,8 +179,11 @@ async fn main() {
     let api = account::load().map(|login| account::Api::new(client.clone(), login));
 
     match &cli.command {
-        Commands::Send { path, name, to } => {
+        Commands::Send { path, name, to, message } => {
             let recipients = to.as_deref().map(split_list).unwrap_or_default();
+            if message.as_ref().map_or(false, |m| m.chars().count() > manifest::MAX_MESSAGE_CHARS) {
+                out.fail("Send", format!("message is longer than {} characters", manifest::MAX_MESSAGE_CHARS));
+            }
 
             // Check recipients before uploading anything.
             if !recipients.is_empty() {
@@ -183,7 +206,7 @@ async fn main() {
             out.say(&format!("Storage nodes: {} (total)", storage_nodes.len()));
             out.say("");
 
-            let config = upload::UploadConfig { storage_nodes, relay_url: relay };
+            let config = upload::UploadConfig { storage_nodes, relay_url: relay, message: message.clone() };
             let (code, relay_hash, manifest) = match upload::upload_path(path, name, &config).await {
                 Ok(r) => r,
                 Err(e) => out.fail("Upload", e),
@@ -195,7 +218,15 @@ async fn main() {
             let mut notify_error = None;
             if let (false, Some(api)) = (recipients.is_empty(), &api) {
                 match api
-                    .notify(&relay_hash, &code, name, manifest.files.len(), manifest.total_bytes, &recipients)
+                    .notify(
+                        &relay_hash,
+                        &code,
+                        name,
+                        manifest.message.as_deref(),
+                        manifest.files.len(),
+                        manifest.total_bytes,
+                        &recipients,
+                    )
                     .await
                 {
                     Ok(v) => notified = v,
@@ -262,6 +293,7 @@ async fn main() {
             out.ok(
                 json!({
                     "transfer_name": manifest.transfer_name,
+                    "message": manifest.message,
                     "total_bytes": manifest.total_bytes,
                     "files": files,
                     "acknowledged": result.acknowledged,
@@ -271,14 +303,43 @@ async fn main() {
                     println!();
                     println!("✓ Download complete!");
                     println!();
-                    println!("  Transfer: {}", manifest.transfer_name);
+                    println!("  Transfer: {}", manifest::printable(&manifest.transfer_name));
+                    print_message(manifest.message.as_deref());
                     println!("  Files: {}", manifest.files.len());
                     println!("  Total size: {} bytes", manifest.total_bytes);
                     println!();
                     println!("  File hashes (BLAKE3, verified against sender):");
                     for (path, hash) in &result.file_hashes {
-                        println!("  {} → {}", path, hash);
+                        println!("  {} → {}", manifest::printable(path), hash);
                     }
+                },
+            );
+        }
+
+        Commands::Info { code } => {
+            let (relay, _) = resolve_servers(&cli, api.as_ref()).await;
+            let opened = match download::open_transfer(&client, code, &relay).await {
+                Ok(o) => o,
+                Err(e) => out.fail("Info", e),
+            };
+            let m = &opened.manifest;
+            let files: Vec<_> = m.files.iter().map(|f| json!({ "path": f.path, "size": f.size })).collect();
+            out.ok(
+                json!({
+                    "transfer_name": m.transfer_name,
+                    "message": m.message,
+                    "total_bytes": m.total_bytes,
+                    "files": files,
+                }),
+                || {
+                    println!("Transfer: {}", manifest::printable(&m.transfer_name));
+                    print_message(m.message.as_deref());
+                    println!("Total size: {} bytes in {} file(s)", m.total_bytes, m.files.len());
+                    for f in &m.files {
+                        println!("  {}  ({} bytes)", manifest::printable(&f.path), f.size);
+                    }
+                    println!();
+                    println!("Receive with: helppeer receive {}", code);
                 },
             );
         }
@@ -332,12 +393,17 @@ async fn main() {
                         .unwrap_or_else(|| item["sender_email"].as_str().unwrap_or("?").to_string());
                     println!(
                         "{} — from {} ({} file(s), {} bytes, expires {})",
-                        item["transfer_name"].as_str().unwrap_or("untitled"),
-                        from,
+                        manifest::printable(item["transfer_name"].as_str().unwrap_or("untitled")),
+                        manifest::printable(&from),
                         item["files"],
                         item["total_bytes"],
                         item["expires_at"].as_str().unwrap_or("?"),
                     );
+                    if let Some(msg) = item["message"].as_str().filter(|m| !m.is_empty()) {
+                        for line in manifest::printable(msg).lines() {
+                            println!("  │ {}", line);
+                        }
+                    }
                     println!("  helppeer receive {}", item["code"].as_str().unwrap_or("?"));
                 }
             });

@@ -71,6 +71,11 @@ export default function Inbox() {
                     From {item.sender_username ? `@${item.sender_username}` : item.sender_email} ·{' '}
                     {item.files} file(s) · {formatBytes(item.total_bytes)} · {timeLeft(item.expires_at)}
                   </div>
+                  {item.message && (
+                    <p className="text-sm text-gray-700 whitespace-pre-wrap break-words border-l-2 border-indigo-200 pl-2 my-1">
+                      {item.message}
+                    </p>
+                  )}
                   <code className="text-xs text-gray-400 font-mono">{item.code}</code>
                 </div>
                 <div className="flex gap-3 shrink-0">

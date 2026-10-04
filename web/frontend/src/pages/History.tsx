@@ -42,6 +42,9 @@ export default function History() {
                   <div className="text-sm text-gray-500">
                     {t.files} file(s) · {formatBytes(t.total_bytes)}
                   </div>
+                  {t.message && (
+                    <div className="text-sm text-gray-600 whitespace-pre-wrap break-words line-clamp-2">{t.message}</div>
+                  )}
                   {t.recipients?.length > 0 && (
                     <div className="text-xs text-gray-400">Sent to {t.recipients.join(', ')}</div>
                   )}

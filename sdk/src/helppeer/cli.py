@@ -3,7 +3,8 @@ import argparse
 import json
 import sys
 
-from . import send, receive, cancel, configure, login, logout, inbox
+from . import send, receive, info, cancel, configure, login, logout, inbox
+from .manifest import printable
 
 
 def _add_global_options(p, **default):
@@ -34,10 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
     send_cmd.add_argument("--name", default="untitled-transfer", help="Transfer name")
     send_cmd.add_argument("--to", help="Recipients, comma-separated: usernames (alice or @alice) get it in "
                                        "their inbox, emails get the code by email. Needs `login`.")
+    send_cmd.add_argument("--message", help="A note describing the transfer (up to 2000 characters). Recipients "
+                                            "see it with the files, in their inbox and in notification emails.")
 
     recv_cmd = sub.add_parser("receive", parents=[common], help="Receive a transfer")
     recv_cmd.add_argument("code", help="Transfer code (e.g., orbit-velvet-zoom-candle-harbor-ember)")
     recv_cmd.add_argument("--output", default="./received", help="Output directory")
+
+    info_cmd = sub.add_parser("info", parents=[common],
+                              help="Show a transfer's name, message and files without downloading it")
+    info_cmd.add_argument("code", help="Transfer code")
 
     cancel_cmd = sub.add_parser("cancel", parents=[common], help="Cancel a transfer before it expires")
     cancel_cmd.add_argument("code", help="Transfer code")
@@ -66,7 +73,7 @@ def main():
 
     try:
         {
-            "send": _send, "receive": _receive, "cancel": _cancel,
+            "send": _send, "receive": _receive, "info": _info, "cancel": _cancel,
             "inbox": _inbox, "login": _login, "logout": _logout,
         }[args.command](args)
     except Exception as e:  # report any failure cleanly instead of a traceback
@@ -84,7 +91,7 @@ def _send(args):
         print()
 
     to = [r.strip() for r in args.to.split(",") if r.strip()] if args.to else None
-    result = send(args.path, name=args.name, to=to, return_details=True)
+    result = send(args.path, name=args.name, to=to, message=args.message, return_details=True)
 
     if args.json:
         print(json.dumps({"status": "ok", "path": args.path, **result}, indent=2))
@@ -113,6 +120,7 @@ def _receive(args):
         print(json.dumps({
             "status": "ok",
             "transfer_name": result["transfer_name"],
+            "message": result["message"],
             "total_bytes": result["total_bytes"],
             "files": result["file_list"],
             "acknowledged": result["acknowledged"],
@@ -121,13 +129,14 @@ def _receive(args):
         return
     print("✓ Download complete!")
     print()
-    print(f"  Transfer: {result['transfer_name']}")
+    print(f"  Transfer: {printable(result['transfer_name'])}")
+    _print_message(result["message"])
     print(f"  Files: {result['files']}")
     print(f"  Total size: {result['total_bytes']} bytes")
     print()
     print("  File hashes (BLAKE3, verified against sender):")
     for path, h in result["file_hashes"].items():
-        print(f"  {path} → {h}")
+        print(f"  {printable(path)} → {h}")
 
 
 def _cancel(args):
@@ -145,6 +154,27 @@ def _cancel(args):
               "they expire within 24 hours")
 
 
+def _print_message(message):
+    if message and message.strip():
+        print("  Message from sender:")
+        for line in printable(message).splitlines():
+            print(f"    │ {line}")
+
+
+def _info(args):
+    result = info(args.code)
+    if args.json:
+        print(json.dumps({"status": "ok", **result}, indent=2))
+        return
+    print(f"Transfer: {printable(result['transfer_name'])}")
+    _print_message(result["message"])
+    print(f"Total size: {result['total_bytes']} bytes in {len(result['files'])} file(s)")
+    for f in result["files"]:
+        print(f"  {printable(f['path'])}  ({f['size']} bytes)")
+    print()
+    print(f"Receive with: helppeer receive {args.code}")
+
+
 def _inbox(args):
     items = inbox()
     if args.json:
@@ -154,8 +184,10 @@ def _inbox(args):
         print("Nothing waiting for you.")
     for item in items:
         sender = f"@{item['sender_username']}" if item.get("sender_username") else item.get("sender_email", "?")
-        print(f"{item.get('transfer_name') or 'untitled'} — from {sender} "
+        print(f"{printable(item.get('transfer_name') or 'untitled')} — from {printable(sender)} "
               f"({item['files']} file(s), {item['total_bytes']} bytes, expires {item['expires_at']})")
+        for line in printable(item.get("message") or "").splitlines():
+            print(f"  │ {line}")
         print(f"  helppeer receive {item['code']}")
 
 

@@ -24,26 +24,44 @@ pub struct DownloadResult {
 }
 
 /// Download and reconstruct a transfer using a code.
+/// A decrypted, validated manifest and what's needed to act on it.
+pub struct OpenedTransfer {
+    pub manifest: Manifest,
+    pub manifest_json: Vec<u8>,
+    pub manifest_url: String,
+    pub relay_hash: String,
+    pub k_data: Vec<u8>,
+}
+
+/// Fetch and decrypt a transfer's manifest. This doesn't consume the
+/// transfer, so it's also how `info` previews one.
+pub async fn open_transfer(client: &Client, code: &str, relay_url: &str) -> Result<OpenedTransfer, String> {
+    let (k_data, k_index) = crypto::derive_keys(code);
+    let relay_hash = crypto::relay_hash(&k_index);
+
+    let manifest_url = format!("{}/manifest/{}", relay_url, relay_hash);
+    let encrypted_manifest = http::get(client, &manifest_url, "manifest download")
+        .await?
+        .ok_or("transfer not found: the code is wrong, it expired, or it was already received")?;
+
+    let manifest_json = crypto::decrypt_segment(&k_data, &encrypted_manifest)?;
+    let manifest = Manifest::from_json(&manifest_json)?;
+    manifest.validate()?;
+    Ok(OpenedTransfer { manifest, manifest_json, manifest_url, relay_hash, k_data })
+}
+
+/// Download and reconstruct a transfer using a code.
 pub async fn download_transfer(
     code: &str,
     output_dir: &Path,
     relay_url: &str,
 ) -> Result<DownloadResult, String> {
     let client = http::client()?;
-    let (k_data, k_index) = crypto::derive_keys(code);
-    let relay_hash = crypto::relay_hash(&k_index);
 
-    // Download encrypted manifest from relay. It stays there until we
-    // confirm success below, so a failed download can be retried.
-    let manifest_url = format!("{}/manifest/{}", relay_url, relay_hash);
-    let encrypted_manifest = http::get(&client, &manifest_url, "manifest download")
-        .await?
-        .ok_or("transfer not found: the code is wrong, it expired, or it was already received")?;
-
-    // Decrypt manifest
-    let manifest_json = crypto::decrypt_segment(&k_data, &encrypted_manifest)?;
-    let manifest = Manifest::from_json(&manifest_json)?;
-    manifest.validate()?;
+    // The manifest stays on the relay until we confirm success below, so a
+    // failed download can be retried.
+    let OpenedTransfer { manifest, manifest_json, manifest_url, relay_hash, k_data } =
+        open_transfer(&client, code, relay_url).await?;
 
     // Validate every path before touching the filesystem.
     let file_paths = manifest

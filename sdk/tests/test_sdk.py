@@ -391,3 +391,31 @@ class TestCLIParsing:
         # A value given before the subcommand isn't reset by the subcommand's copy.
         a = p.parse_args(["--relay", "http://r", "send", "./x"])
         assert a.relay == "http://r" and a.json is False
+
+
+class TestMessage:
+    def test_message_roundtrips_in_manifest(self):
+        m = _valid_manifest()
+        m.message = "Fine-tuned on run 42.\nUse with tokenizer v3."
+        assert manifest.Manifest.from_json(m.to_json()).message == m.message
+        m.validate()
+
+    def test_manifest_without_message(self):
+        m = _valid_manifest()
+        assert "message" not in json.loads(m.to_json())
+        assert manifest.Manifest.from_json(m.to_json()).message is None
+
+    def test_too_long_message_rejected(self):
+        m = _valid_manifest()
+        m.message = "x" * (manifest.MAX_MESSAGE_CHARS + 1)
+        with pytest.raises(ValueError):
+            m.validate()
+
+    def test_send_rejects_long_message_before_uploading(self, tmp_path):
+        import helppeer
+        (tmp_path / "f").write_text("x")
+        with pytest.raises(ValueError, match="longer than"):
+            helppeer.send(str(tmp_path / "f"), message="x" * 2001)
+
+    def test_printable_strips_escape_sequences(self):
+        assert manifest.printable("hi\x1b[2Jthere\nline 2\ttab\x07") == "hi[2Jthere\nline 2\ttab"

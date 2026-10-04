@@ -5,11 +5,15 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 # Version 2 introduced Argon2id key derivation, ack_secret and delete_token.
 MANIFEST_VERSION = 2
+
+# Longest message a sender may attach, in characters.
+MAX_MESSAGE_CHARS = 2000
 
 NONCE_SIZE = 12
 TAG_SIZE = 16
@@ -54,6 +58,8 @@ class Manifest:
     # Hex token that authorizes deleting this transfer's shards from storage
     # nodes (they only store its BLAKE3).
     delete_token: str = ""
+    # Optional note from the sender describing the transfer.
+    message: Optional[str] = None
     total_bytes: int = 0
     segment_size: int = 67108864
     erasure_data_shards: int = 8
@@ -83,7 +89,7 @@ class Manifest:
                 entry["blake3"] = f.blake3
             files.append(entry)
 
-        return json.dumps({
+        out = {
             "version": self.version,
             "transfer_name": self.transfer_name,
             "ack_secret": self.ack_secret,
@@ -93,7 +99,10 @@ class Manifest:
             "erasure_data_shards": self.erasure_data_shards,
             "erasure_parity_shards": self.erasure_parity_shards,
             "files": files,
-        }).encode("utf-8")
+        }
+        if self.message is not None:
+            out["message"] = self.message
+        return json.dumps(out).encode("utf-8")
 
     @classmethod
     def from_json(cls, data: bytes) -> "Manifest":
@@ -103,6 +112,7 @@ class Manifest:
             transfer_name=d["transfer_name"],
             ack_secret=d.get("ack_secret", ""),
             delete_token=d.get("delete_token", ""),
+            message=d.get("message"),
             total_bytes=d["total_bytes"],
             segment_size=d["segment_size"],
             erasure_data_shards=d["erasure_data_shards"],
@@ -132,6 +142,8 @@ class Manifest:
             raise ValueError(f"unsupported manifest version {self.version}")
         if not (_HEX_HASH.match(self.ack_secret or "") and _HEX_HASH.match(self.delete_token or "")):
             raise ValueError("manifest has an invalid ack secret or delete token")
+        if self.message is not None and (not isinstance(self.message, str) or len(self.message) > MAX_MESSAGE_CHARS):
+            raise ValueError("manifest message is invalid or too long")
         k, m = self.erasure_data_shards, self.erasure_parity_shards
         if not (isinstance(k, int) and isinstance(m, int) and k >= 1 and m >= 0 and k + m <= 256):
             raise ValueError(f"invalid erasure coding {k}+{m}")
@@ -228,6 +240,12 @@ def read_file_segment(filepath: str, segment_index: int, segment_size: int) -> b
     with open(filepath, "rb") as f:
         f.seek(segment_index * segment_size)
         return f.read(segment_size)
+
+
+def printable(text: str) -> str:
+    """Make sender-supplied text safe to print to a terminal: drop control
+    characters (which could inject escape sequences) except newlines and tabs."""
+    return "".join(c for c in text if c in "\n\t" or unicodedata.category(c)[0] != "C")
 
 
 def safe_output_path(output_dir: str, rel_path: str) -> str:

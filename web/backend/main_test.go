@@ -941,3 +941,63 @@ func TestCancelClearsInbox(t *testing.T) {
 		t.Fatalf("cancel: %d, %d inbox items left", code, len(e.s.db.inbox))
 	}
 }
+
+func TestMessageReachesInboxAndEmails(t *testing.T) {
+	e := newTestEnv(t)
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	alice := e.s.db.CreateSession("alice@example.com")
+	bob := e.s.db.CreateSession("bob@example.com")
+	e.s.db.SetProfile("bob@example.com", "bob", false)
+	hash := strings.Repeat("ab", 32)
+	e.relay.manifests[hash] = []byte("enc")
+
+	upload := func(msg string) (int, map[string]interface{}) {
+		uploadHash := make([]byte, 32)
+		rand.Read(uploadHash)
+		return e.do(t, "POST", "/api/upload/manifest", map[string]interface{}{
+			"manifest_hash": hex.EncodeToString(uploadHash), "manifest_data": []byte("x"),
+			"ack_hash": strings.Repeat("ac", 32), "transfer_name": "weights", "message": msg,
+		}, alice, "")
+	}
+	if code, _ := upload(strings.Repeat("x", 2001)); code != 400 {
+		t.Fatalf("too-long message accepted: %d", code)
+	}
+	_, up := upload("  Fine-tuned on run 42.\nUse tokenizer v3.\x1b[2J  ")
+
+	code, _ := e.do(t, "POST", "/api/notify", map[string]interface{}{
+		"transfer_id": up["transfer_id"], "manifest_hash": hash,
+		"code": "orbit-velvet-zoom-candle-harbor-ember", "recipients": []string{"bob", "carol@example.com"},
+	}, alice, "")
+	if code != 200 {
+		t.Fatalf("notify: %d", code)
+	}
+
+	want := "Fine-tuned on run 42.\nUse tokenizer v3.[2J"
+	_, inbox := e.do(t, "GET", "/api/inbox", nil, bob, "")
+	item := inbox["items"].([]interface{})[0].(map[string]interface{})
+	if item["message"] != want {
+		t.Fatalf("inbox message %q", item["message"])
+	}
+	_, hist := e.do(t, "GET", "/api/history", nil, alice, "")
+	if !strings.Contains(fmt.Sprint(hist), "Fine-tuned on run 42.") {
+		t.Fatalf("history lacks message: %v", hist)
+	}
+	for _, who := range []string{"Inbox alert to bob@example.com", "Email to carol@example.com"} {
+		if !strings.Contains(logs.String(), who) || !strings.Contains(logs.String(), `Fine-tuned on run 42.\nUse tokenizer v3.`) {
+			t.Fatalf("%s missing message in logs: %s", who, logs.String())
+		}
+	}
+}
+
+func TestEmailMessageBlock(t *testing.T) {
+	if got := emailMessageBlock("alice", ""); got != "" {
+		t.Fatalf("empty message: %q", got)
+	}
+	got := emailMessageBlock("alice", "line one\nline two")
+	if !strings.Contains(got, "Message from alice:") || !strings.Contains(got, "  > line one\n  > line two") {
+		t.Fatalf("got %q", got)
+	}
+}
