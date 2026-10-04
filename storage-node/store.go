@@ -9,9 +9,14 @@ import (
 // Implementations include DiskStore (local filesystem) and S3Store
 // (S3-compatible: AWS S3, MinIO, Cloudflare R2, Backblaze B2).
 type ShardStore interface {
-	// Put stores shard data with the given hash and TTL.
+	// Put stores shard data with the given hash and TTL. deleteTokenHash,
+	// if not empty, is the BLAKE3 (hex) of the token that may delete it.
 	// Returns the number of bytes written.
-	Put(hash string, data io.Reader, ttl time.Duration) (int64, error)
+	Put(hash string, data io.Reader, ttl time.Duration, deleteTokenHash string) (int64, error)
+
+	// DeleteTokenHash returns the delete-token hash stored with a shard,
+	// or "" if it has none.
+	DeleteTokenHash(hash string) (string, error)
 
 	// Get retrieves shard data by hash.
 	// Returns nil reader and error if not found.

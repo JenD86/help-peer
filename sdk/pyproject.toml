@@ -26,6 +26,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "argon2-cffi>=21.2",
     "cryptography>=41.0",
     "blake3>=0.3",
     "requests>=2.28",

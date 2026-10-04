@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { deriveKeys, relayHash, decryptSegment, fileHasher } from '../lib/crypto'
-import { downloadManifest, downloadSegment, type ShardInfo } from '../lib/api'
+import { downloadManifest, downloadSegment, ackDownload, type ShardInfo } from '../lib/api'
 
 interface ManifestFile {
   path: string
@@ -17,6 +17,8 @@ interface ManifestFile {
 interface Manifest {
   version: number
   transfer_name: string
+  ack_secret: string
+  delete_token: string
   total_bytes: number
   segment_size: number
   erasure_data_shards: number
@@ -48,7 +50,11 @@ function safePathParts(path: string): string[] {
 }
 
 function checkManifest(m: Manifest) {
-  if (m.version !== 1 || m.erasure_data_shards !== 8 || m.erasure_parity_shards !== 4 || !Array.isArray(m.files)) {
+  const isHex64 = (s: unknown) => typeof s === 'string' && /^[0-9a-f]{64}$/.test(s)
+  if (m.version !== 2 || !isHex64(m.ack_secret) || !isHex64(m.delete_token)) {
+    throw new Error('This transfer was made with an incompatible version of Help Peer')
+  }
+  if (m.erasure_data_shards !== 8 || m.erasure_parity_shards !== 4 || !Array.isArray(m.files)) {
     throw new Error('Unsupported transfer format')
   }
   for (const f of m.files) safePathParts(f.path)
@@ -60,6 +66,7 @@ export default function Download() {
   const [progress, setProgress] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
   const [downloadedFiles, setDownloadedFiles] = useState<string[]>([])
+  const [ackFailed, setAckFailed] = useState(false)
 
   const handleDownload = async () => {
     if (!code.trim()) return
@@ -82,9 +89,10 @@ export default function Download() {
 
     try {
       const { kData, kIndex } = await deriveKeys(code)
+      const rHash = relayHash(kIndex)
 
       setProgress('Fetching manifest from relay...')
-      const manifestData = await downloadManifest(relayHash(kIndex))
+      const manifestData = await downloadManifest(rHash)
 
       setProgress('Decrypting manifest...')
       let manifest: Manifest
@@ -149,13 +157,26 @@ export default function Download() {
         downloaded.push(file.path)
       }
 
+      // Everything verified: confirm, which uses up this recipient's
+      // retrieval. If it fails the transfer just expires on its own.
+      let acked = true
+      try {
+        await ackDownload(rHash, manifest.ack_secret)
+      } catch {
+        acked = false
+      }
+
+      setAckFailed(!acked)
       setDownloadedFiles(downloaded)
       setStatus('done')
       setProgress('')
     } catch (err: any) {
       setStatus('error')
       setProgress('')
-      setErrorMsg(err.message || 'Download failed. Check your code.')
+      setErrorMsg(
+        (err.message || 'Download failed. Check your code.') +
+          (err.message?.includes('not found') ? '' : ' You can retry with the same code.')
+      )
     }
   }
 
@@ -181,6 +202,11 @@ export default function Download() {
               <div key={i} className="text-sm text-gray-700">{f}</div>
             ))}
           </div>
+          {ackFailed && (
+            <p className="text-xs text-gray-500 mb-4">
+              The relay couldn't be told the download finished, so the transfer stays available until it expires.
+            </p>
+          )}
           <button
             onClick={() => {
               setStatus('idle')

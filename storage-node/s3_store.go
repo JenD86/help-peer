@@ -83,7 +83,7 @@ func NewS3Store(ctx context.Context, ttl time.Duration) (*S3Store, error) {
 	return store, nil
 }
 
-func (s *S3Store) Put(hash string, data io.Reader, ttl time.Duration) (int64, error) {
+func (s *S3Store) Put(hash string, data io.Reader, ttl time.Duration, deleteTokenHash string) (int64, error) {
 	key := s.shardKey(hash)
 
 	// Read data into buffer to get size (S3 requires content-length or streaming)
@@ -97,14 +97,18 @@ func (s *S3Store) Put(hash string, data io.Reader, ttl time.Duration) (int64, er
 		return int64(len(buf)), s.Touch(hash, ttl)
 	}
 
+	metadata := map[string]string{
+		"expires-at": time.Now().Add(ttl).Format(time.RFC3339),
+	}
+	if deleteTokenHash != "" {
+		metadata[deleteTokenMetaKey] = deleteTokenHash
+	}
 	_, err = s.client.PutObject(context.TODO(), &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(buf),
 		ContentType: aws.String("application/octet-stream"),
-		Metadata: map[string]string{
-			"expires-at": time.Now().Add(ttl).Format(time.RFC3339),
-		},
+		Metadata:    metadata,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("S3 PutObject failed: %w", err)
@@ -141,6 +145,20 @@ func (s *S3Store) Get(hash string) (io.ReadCloser, error) {
 	}
 
 	return resp.Body, nil
+}
+
+// deleteTokenMetaKey is the object metadata key holding the delete-token hash.
+const deleteTokenMetaKey = "delete-token-hash"
+
+func (s *S3Store) DeleteTokenHash(hash string) (string, error) {
+	resp, err := s.client.HeadObject(context.TODO(), &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(s.shardKey(hash)),
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.Metadata[deleteTokenMetaKey], nil
 }
 
 func (s *S3Store) Delete(hash string) error {

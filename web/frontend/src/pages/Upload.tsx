@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { deriveKeys, relayHash, encryptSegment, generateCode, fileHasher } from '../lib/crypto'
+import { deriveKeys, relayHash, encryptSegment, generateCode, fileHasher, newSecret, secretHash } from '../lib/crypto'
 import { uploadSegment, uploadManifest, notifyRecipients, checkAuth, type ShardInfo } from '../lib/api'
 
 const SEGMENT_SIZE = 64 * 1024 * 1024 // 64MB
@@ -83,6 +83,9 @@ export default function Upload() {
       const code = generateCode()
       const { kData, kIndex } = await deriveKeys(code)
       const rHash = relayHash(kIndex)
+      const ackSecret = newSecret()
+      const deleteToken = newSecret()
+      const deleteTokenHash = secretHash(deleteToken)
 
       // Encrypt and upload each file one 64MB segment at a time, so files
       // never have to fit in memory whole.
@@ -103,7 +106,7 @@ export default function Upload() {
 
           setStatus('uploading')
           setProgress(`Uploading ${file.name} (${pct}% overall)...`)
-          const uploaded = await uploadSegment(encrypted)
+          const uploaded = await uploadSegment(encrypted, deleteTokenHash)
           segments.push({
             id: `seg_${String(i).padStart(6, '0')}`,
             original_size: plaintext.byteLength,
@@ -124,8 +127,10 @@ export default function Upload() {
       // Build and encrypt the manifest (same format as the CLI)
       setProgress('Uploading manifest...')
       const manifest = {
-        version: 1,
+        version: 2,
         transfer_name: name,
+        ack_secret: ackSecret,
+        delete_token: deleteToken,
         total_bytes: totalBytes,
         segment_size: SEGMENT_SIZE,
         erasure_data_shards: 8,
@@ -138,6 +143,7 @@ export default function Upload() {
       const { transfer_id } = await uploadManifest({
         manifestHash: rHash,
         manifestData: encryptedManifest,
+        ackHash: secretHash(ackSecret),
         maxRetrievals: Math.min(Math.max(recipientList.length, 1), MAX_RETRIEVALS),
         transferName: name,
         files: files.length,

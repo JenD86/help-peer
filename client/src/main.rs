@@ -143,6 +143,7 @@ async fn main() {
                             "transfer_name": manifest.transfer_name,
                             "total_bytes": manifest.total_bytes,
                             "files": files,
+                            "acknowledged": result.acknowledged,
                         });
                         println!("{}", serde_json::to_string_pretty(&json).unwrap());
                     } else {

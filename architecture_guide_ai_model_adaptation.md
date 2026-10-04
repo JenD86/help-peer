@@ -2,7 +2,7 @@
 
 ## 1. System Overview
 
-This system is explicitly designed for the secure, decentralized, and asynchronous transfer of massive AI model weight directories (often $50\text{ GB} - 150\text{ GB}+$). It combines a human-readable Password-Authenticated Key Exchange (PAKE) with an encrypted, sharded ephemeral storage layer, optimized for the unique constraints of handling large machine learning assets.
+This system is explicitly designed for the secure, decentralized, and asynchronous transfer of massive AI model weight directories (often $50\text{ GB} - 150\text{ GB}+$). It combines a human-readable transfer code (stretched with Argon2id into encryption keys) with an encrypted, sharded ephemeral storage layer, optimized for the unique constraints of handling large machine learning assets.
 
 **Core AI-Specific Properties:**
 
@@ -47,9 +47,9 @@ Unlike a single-file transfer, the Sender's client crawls the chosen model direc
 
 ### Phase 1: Handshake & Manifest Generation
 
-1. The **Sender** selects a local model directory and generates a code (e.g., `7-orbit-velvet`).
+1. The **Sender** selects a local model directory and generates a code of six random words (e.g., `orbit-velvet-zoom-candle-harbor-ember`).
 
-2. SPAKE2 derives $K_{data}$ (encryption key) and $K_{index}$ (Relay routing key).
+2. Argon2id followed by HKDF derives $K_{data}$ (encryption key) and $K_{index}$ (Relay routing key) from the code. A PAKE such as SPAKE2 isn't possible here because sender and receiver are never online at the same time, so the code itself is the secret and must have high entropy (~77 bits).
 
 3. The Sender's client generates the Multi-File Manifest (as shown above).
 
@@ -65,7 +65,7 @@ Unlike a single-file transfer, the Sender's client crawls the chosen model direc
 
 ### Phase 3: Retrieval & Safe Allocation
 
-1. The **Receiver** inputs `7-orbit-velvet`.
+1. The **Receiver** inputs `orbit-velvet-zoom-candle-harbor-ember`.
 
 2. The Receiver's client derives the keys, downloads the encrypted Manifest from the Relay, and decrypts it.
 
@@ -204,7 +204,7 @@ The Relay Server is implemented in **Go** as a lightweight, stateless-friendly s
 
 * Store encrypted manifests indexed by `H(K_index)`.
 * Serve manifests to receivers who present the correct code-derived key.
-* Enforce one-time retrieval (manifest is deleted after first successful download).
+* Delete each manifest once its receivers confirm a verified download (or when its TTL expires). Fetching alone doesn't consume it, so failed downloads can be retried.
 * Rate-limit manifest creation to prevent abuse.
 
 ### 7.3 API
@@ -212,14 +212,15 @@ The Relay Server is implemented in **Go** as a lightweight, stateless-friendly s
 | Method | Path | Body | Description |
 |---|---|---|---|
 | `PUT` | `/manifest/{hash}` | Encrypted manifest blob | Store an encrypted manifest |
-| `GET` | `/manifest/{hash}` | — | Retrieve and delete manifest (one-time) |
+| `GET` | `/manifest/{hash}` | — | Retrieve manifest |
+| `POST` | `/manifest/{hash}/ack` | Ack secret | Confirm a completed download (deletes after the last confirmation) |
 | `GET` | `/health` | — | Relay health check |
 
 ### 7.4 Security
 
 * Manifests are encrypted client-side with $K_{data}$ before upload. The relay never sees plaintext.
 * The `{hash}` in the URL is `BLAKE3(K_index)`, so the relay cannot enumerate transfers.
-* One-time retrieval prevents replay attacks.
+* Confirmation requires a secret from inside the encrypted manifest, so only someone who decrypted it can consume it.
 * Rate limiting (e.g., 10 manifest PUTs per minute per IP) prevents abuse.
 
 ## 8. Security & Edge Cases
@@ -235,7 +236,7 @@ Nodes with poor reputation are deprioritized in shard placement decisions.
 
 ### 8.2 Shard Integrity
 
-Each shard carries an HMAC tag derived from $K_{data}$. Storage nodes cannot tamper with shard contents undetectably. The client verifies the HMAC upon download before attempting erasure reconstruction.
+Each shard is addressed by its BLAKE3 hash, which is recorded in the encrypted manifest. Storage nodes reject uploads that don't match their hash, and receivers discard downloaded shards that don't match and rebuild from parity instead. Every file is also checked against a BLAKE3 hash of the whole file recorded by the sender.
 
 ### 8.3 Churn Handling
 
@@ -246,7 +247,7 @@ If a Storage Node goes offline during a transfer:
 
 ### 8.4 Code Reuse Prevention
 
-PAKE codes are single-use. The relay enforces one-time manifest retrieval — once a receiver downloads the manifest, it is deleted from the relay. This prevents a second party from intercepting the transfer.
+Each transfer gets a fresh random code. The relay deletes the manifest once the receiver confirms a verified download (or, for multi-recipient transfers, once each recipient has), and in any case when the TTL expires. Until then anyone holding the code can fetch it, so the code should be shared over a channel the sender trusts.
 
 ### 8.5 Abuse Prevention
 

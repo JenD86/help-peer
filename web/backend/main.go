@@ -32,9 +32,11 @@ type Server struct {
 	storageNodes []StorageNode
 	smtpConfig   *SMTPConfig
 	static       fs.FS
+	health       *nodeHealth
 
-	manifestMisses *rateLimiter // failed manifest lookups per client
-	notifyLimit    *rateLimiter // notification emails per sender
+	manifestMisses  *rateLimiter // failed manifest lookups per client
+	manifestUploads *rateLimiter // manifest uploads per client
+	notifyLimit     *rateLimiter // notification emails per sender
 }
 
 type SMTPConfig struct {
@@ -113,14 +115,16 @@ func main() {
 
 func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, baseURL string, static fs.FS) *Server {
 	return &Server{
-		db:             db,
-		auth:           NewAuth(db, smtp, baseURL),
-		relayURL:       relayURL,
-		storageNodes:   nodes,
-		smtpConfig:     smtp,
-		static:         static,
-		manifestMisses: newRateLimiter(30, time.Minute),
-		notifyLimit:    newRateLimiter(50, time.Hour),
+		db:              db,
+		auth:            NewAuth(db, smtp, baseURL),
+		relayURL:        relayURL,
+		storageNodes:    nodes,
+		smtpConfig:      smtp,
+		static:          static,
+		health:          &nodeHealth{downUntil: map[int]time.Time{}},
+		manifestMisses:  newRateLimiter(30, time.Minute),
+		manifestUploads: newRateLimiter(30, time.Minute),
+		notifyLimit:     newRateLimiter(50, time.Hour),
 	}
 }
 
@@ -136,6 +140,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/upload/manifest", s.manifestUploadHandler)
 	mux.HandleFunc("/api/download", s.downloadHandler)
 	mux.HandleFunc("/api/download/segment", s.segmentDownloadHandler)
+	mux.HandleFunc("/api/download/ack", s.ackHandler)
 	mux.HandleFunc("/api/notify", s.notifyHandler)
 	mux.HandleFunc("/api/history", s.historyHandler)
 	mux.HandleFunc("/api/health", s.healthHandler)

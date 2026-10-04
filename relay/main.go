@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"lukechampine.com/blake3"
 )
 
 // Hard cap on X-Max-Retrievals so a single manifest can't be pinned open forever.
@@ -27,14 +31,22 @@ type Relay struct {
 	started          time.Time
 	ttl              time.Duration
 	maxManifestBytes int64
+	maxTotalBytes    int64
+	usedBytes        int64 // total size of stored manifests; guarded by mu
 	defaultRetrieval int
-	misses           *rateLimiter
+	misses           *rateLimiter // failed lookups / acks per client
+	puts             *rateLimiter // uploads per client
 }
 
 // manifestMeta is stored next to each manifest as {hash}.meta.
 type manifestMeta struct {
 	Remaining int   `json:"remaining"`
 	ExpiresAt int64 `json:"expires_at"` // unix seconds
+	// AckHash is BLAKE3 of the secret a receiver presents to confirm a
+	// completed download. Fetching doesn't consume the manifest; confirming
+	// does, so a receiver can retry a failed download. Manifests uploaded
+	// without one (older clients) are consumed on fetch instead.
+	AckHash string `json:"ack_hash,omitempty"`
 }
 
 type HealthResponse struct {
@@ -56,9 +68,12 @@ func main() {
 		started:          time.Now(),
 		ttl:              time.Duration(envInt("RELAY_TTL", 86400)) * time.Second,
 		maxManifestBytes: int64(envInt("RELAY_MAX_MANIFEST_BYTES", 32<<20)),
+		maxTotalBytes:    int64(envInt("RELAY_MAX_TOTAL_BYTES", 1<<30)),
 		defaultRetrieval: envInt("RELAY_MAX_RETRIEVALS", 1),
 		misses:           newRateLimiter(envInt("RELAY_MISS_LIMIT", 30), time.Minute),
+		puts:             newRateLimiter(envInt("RELAY_PUT_LIMIT", 120), time.Minute),
 	}
+	relay.usedBytes = relay.measureUsage()
 
 	go relay.cleanupLoop()
 
@@ -75,19 +90,27 @@ func (r *Relay) routes() http.Handler {
 }
 
 func (r *Relay) manifestHandler(w http.ResponseWriter, req *http.Request) {
-	hash := strings.TrimPrefix(req.URL.Path, "/manifest/")
+	rest := strings.TrimPrefix(req.URL.Path, "/manifest/")
+	hash, action := rest, ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		hash, action = rest[:i], rest[i+1:]
+	}
 	if !hashRe.MatchString(hash) {
 		http.Error(w, "invalid hash", http.StatusBadRequest)
 		return
 	}
 
-	switch req.Method {
-	case http.MethodPut:
+	switch {
+	case action == "" && req.Method == http.MethodPut:
 		r.putManifest(w, req, hash)
-	case http.MethodGet:
+	case action == "" && req.Method == http.MethodGet:
 		r.getManifest(w, req, hash)
-	default:
+	case action == "ack" && req.Method == http.MethodPost:
+		r.ackManifest(w, req, hash)
+	case action == "" || action == "ack":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	default:
+		http.NotFound(w, req)
 	}
 }
 
@@ -96,6 +119,17 @@ func (r *Relay) manifestPath(hash string) string {
 }
 
 func (r *Relay) putManifest(w http.ResponseWriter, req *http.Request, hash string) {
+	if !r.puts.Allow(clientIP(req)) {
+		http.Error(w, "too many uploads", http.StatusTooManyRequests)
+		return
+	}
+
+	ackHash := req.Header.Get("X-Ack-Hash")
+	if ackHash != "" && !hashRe.MatchString(ackHash) {
+		http.Error(w, "invalid X-Ack-Hash", http.StatusBadRequest)
+		return
+	}
+
 	maxRetrievals := r.defaultRetrieval
 	if hdr := req.Header.Get("X-Max-Retrievals"); hdr != "" {
 		n, err := strconv.Atoi(hdr)
@@ -133,6 +167,11 @@ func (r *Relay) putManifest(w http.ResponseWriter, req *http.Request, hash strin
 		}
 	}
 
+	if r.usedBytes+int64(len(data)) > r.maxTotalBytes {
+		http.Error(w, "relay storage full", http.StatusInsufficientStorage)
+		return
+	}
+
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0755); err != nil {
 		log.Printf("Failed to create manifest dir: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -141,7 +180,7 @@ func (r *Relay) putManifest(w http.ResponseWriter, req *http.Request, hash strin
 
 	// Write the metadata first: once the manifest itself is visible, readers
 	// must already see the right retrieval count and expiry.
-	meta := manifestMeta{Remaining: maxRetrievals, ExpiresAt: time.Now().Add(r.ttl).Unix()}
+	meta := manifestMeta{Remaining: maxRetrievals, ExpiresAt: time.Now().Add(r.ttl).Unix(), AckHash: ackHash}
 	if err := writeMeta(manifestPath, meta); err != nil {
 		log.Printf("Failed to write manifest metadata: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -154,6 +193,7 @@ func (r *Relay) putManifest(w http.ResponseWriter, req *http.Request, hash strin
 		return
 	}
 
+	r.usedBytes += int64(len(data))
 	log.Printf("Stored manifest %s (%d bytes, max_retrievals=%d)", hash[:12], len(data), maxRetrievals)
 	w.WriteHeader(http.StatusCreated)
 }
@@ -177,22 +217,77 @@ func (r *Relay) getManifest(w http.ResponseWriter, req *http.Request, hash strin
 		return
 	}
 
-	meta := r.readMeta(manifestPath)
-	meta.Remaining--
-	if meta.Remaining <= 0 {
-		r.deleteManifest(manifestPath)
-		log.Printf("Retrieved and deleted manifest %s (%d bytes, final retrieval)", hash[:12], len(data))
-	} else {
-		if err := writeMeta(manifestPath, meta); err != nil {
+	// Manifests from older clients have no ack secret and are consumed here.
+	if meta := r.readMeta(manifestPath); meta.AckHash == "" {
+		if err := r.consume(manifestPath, meta); err != nil {
 			log.Printf("Failed to update manifest metadata: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("Retrieved manifest %s (%d bytes, %d retrievals remaining)", hash[:12], len(data), meta.Remaining)
 	}
 
+	log.Printf("Retrieved manifest %s (%d bytes)", hash[:12], len(data))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(data)
+}
+
+// ackManifest records a completed download. The body is the hex ack secret
+// from inside the encrypted manifest, which proves the caller decrypted it.
+func (r *Relay) ackManifest(w http.ResponseWriter, req *http.Request, hash string) {
+	ip := clientIP(req)
+	if r.misses.Exceeded(ip) {
+		http.Error(w, "too many failed requests", http.StatusTooManyRequests)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, 256))
+	if err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	secret, err := hex.DecodeString(strings.TrimSpace(string(body)))
+	if err != nil || len(secret) != 32 {
+		http.Error(w, "invalid ack secret", http.StatusBadRequest)
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	manifestPath := r.manifestPath(hash)
+	if _, err := os.Stat(manifestPath); err != nil || r.expireIfDue(manifestPath) {
+		r.misses.Hit(ip)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	meta := r.readMeta(manifestPath)
+	sum := blake3.Sum256(secret)
+	if meta.AckHash == "" || subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(meta.AckHash)) != 1 {
+		r.misses.Hit(ip)
+		http.Error(w, "wrong ack secret", http.StatusForbidden)
+		return
+	}
+
+	if err := r.consume(manifestPath, meta); err != nil {
+		log.Printf("Failed to update manifest metadata: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// consume uses up one retrieval, deleting the manifest after the last one.
+// Requires r.mu.
+func (r *Relay) consume(manifestPath string, meta manifestMeta) error {
+	meta.Remaining--
+	if meta.Remaining <= 0 {
+		r.deleteManifest(manifestPath)
+		log.Printf("Manifest %s fully retrieved and deleted", filepath.Base(manifestPath)[:12])
+		return nil
+	}
+	log.Printf("Manifest %s: %d retrievals remaining", filepath.Base(manifestPath)[:12], meta.Remaining)
+	return writeMeta(manifestPath, meta)
 }
 
 func (r *Relay) healthHandler(w http.ResponseWriter, req *http.Request) {
@@ -239,6 +334,9 @@ func (r *Relay) expireIfDue(manifestPath string) bool {
 }
 
 func (r *Relay) deleteManifest(manifestPath string) {
+	if info, err := os.Stat(manifestPath); err == nil {
+		r.usedBytes -= info.Size()
+	}
 	os.Remove(manifestPath)
 	os.Remove(manifestPath + ".meta")
 	os.Remove(manifestPath + ".count")
@@ -252,6 +350,17 @@ func (r *Relay) walkManifests(fn func(path string)) {
 		}
 		return nil
 	})
+}
+
+// measureUsage totals the size of stored manifests (at startup).
+func (r *Relay) measureUsage() int64 {
+	var total int64
+	r.walkManifests(func(path string) {
+		if info, err := os.Stat(path); err == nil {
+			total += info.Size()
+		}
+	})
+	return total
 }
 
 func (r *Relay) cleanupLoop() {
@@ -274,6 +383,7 @@ func (r *Relay) cleanupExpired() {
 		log.Printf("TTL cleanup: removed %d expired manifests", expired)
 	}
 	r.misses.Prune()
+	r.puts.Prune()
 }
 
 func writeMeta(manifestPath string, meta manifestMeta) error {
@@ -305,7 +415,7 @@ func clientIP(req *http.Request) string {
 	return host
 }
 
-// rateLimiter allows `limit` hits per key per fixed window.
+// rateLimiter allows `limit` hits per key per fixed window (0 = unlimited).
 type rateLimiter struct {
 	mu     sync.Mutex
 	limit  int
@@ -339,6 +449,21 @@ func (l *rateLimiter) Exceeded(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.current(key).n >= l.limit
+}
+
+// Allow consumes one unit for key, or reports false if none are left.
+func (l *rateLimiter) Allow(key string) bool {
+	if l.limit <= 0 {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := l.current(key)
+	if w.n >= l.limit {
+		return false
+	}
+	w.n++
+	return true
 }
 
 func (l *rateLimiter) Hit(key string) {

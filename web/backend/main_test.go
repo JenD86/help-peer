@@ -34,6 +34,10 @@ func (n *fakeNode) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	defer n.mu.Unlock()
 	switch req.Method {
 	case http.MethodPut:
+		if !isHexHash(req.Header.Get("X-Delete-Token-Hash")) {
+			http.Error(w, "missing delete token hash", http.StatusBadRequest)
+			return
+		}
 		data, _ := io.ReadAll(req.Body)
 		sum := blake3.Sum256(data)
 		if hex.EncodeToString(sum[:]) != hash {
@@ -52,16 +56,32 @@ func (n *fakeNode) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// fakeRelay stores manifests with one-time retrieval.
+// fakeRelay stores manifests until they're acknowledged.
 type fakeRelay struct {
 	mu        sync.Mutex
 	manifests map[string][]byte
+	ackHashes map[string]string
 }
 
 func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	hash := strings.TrimPrefix(req.URL.Path, "/manifest/")
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if strings.HasSuffix(hash, "/ack") {
+		hash = strings.TrimSuffix(hash, "/ack")
+		secret, _ := io.ReadAll(req.Body)
+		raw, _ := hex.DecodeString(string(secret))
+		sum := blake3.Sum256(raw)
+		if _, ok := r.manifests[hash]; !ok {
+			http.NotFound(w, req)
+		} else if hex.EncodeToString(sum[:]) != r.ackHashes[hash] {
+			w.WriteHeader(http.StatusForbidden)
+		} else {
+			delete(r.manifests, hash)
+			w.WriteHeader(http.StatusNoContent)
+		}
+		return
+	}
 	switch req.Method {
 	case http.MethodPut:
 		if _, ok := r.manifests[hash]; ok {
@@ -69,6 +89,7 @@ func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		r.manifests[hash], _ = io.ReadAll(req.Body)
+		r.ackHashes[hash] = req.Header.Get("X-Ack-Hash")
 		w.WriteHeader(http.StatusCreated)
 	case http.MethodGet:
 		data, ok := r.manifests[hash]
@@ -76,7 +97,6 @@ func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			http.NotFound(w, req)
 			return
 		}
-		delete(r.manifests, hash)
 		w.Write(data)
 	}
 }
@@ -88,12 +108,12 @@ type testEnv struct {
 	relay *fakeRelay
 }
 
-func newTestEnv(t *testing.T) *testEnv {
+func newTestEnv(t *testing.T, extraNodes ...StorageNode) *testEnv {
 	t.Helper()
 	node := &fakeNode{shards: map[string][]byte{}}
 	nodeSrv := httptest.NewServer(node)
 	t.Cleanup(nodeSrv.Close)
-	relay := &fakeRelay{manifests: map[string][]byte{}}
+	relay := &fakeRelay{manifests: map[string][]byte{}, ackHashes: map[string]string{}}
 	relaySrv := httptest.NewServer(relay)
 	t.Cleanup(relaySrv.Close)
 
@@ -106,12 +126,14 @@ func newTestEnv(t *testing.T) *testEnv {
 		"assets/app.js": {Data: []byte("console.log(1)")},
 	}
 	s := NewServer(db, relaySrv.URL,
-		[]StorageNode{{Internal: nodeSrv.URL, Public: publicNode}},
+		append(extraNodes, StorageNode{Internal: nodeSrv.URL, Public: publicNode}),
 		&SMTPConfig{}, "https://helppeer.example.com", static)
 	srv := httptest.NewServer(s.routes())
 	t.Cleanup(srv.Close)
 	return &testEnv{s: s, srv: srv, node: node, relay: relay}
 }
+
+var testDeleteTokenHash = strings.Repeat("de", 32)
 
 func (e *testEnv) post(t *testing.T, path string, body interface{}, cookie string) *http.Response {
 	t.Helper()
@@ -124,6 +146,9 @@ func (e *testEnv) post(t *testing.T, path string, body interface{}, cookie strin
 		r = bytes.NewReader(data)
 	}
 	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+path, r)
+	if path == "/api/upload/segment" {
+		req.Header.Set("X-Delete-Token-Hash", testDeleteTokenHash)
+	}
 	if cookie != "" {
 		req.AddCookie(&http.Cookie{Name: "helppeer_session", Value: cookie})
 	}
@@ -349,7 +374,7 @@ func TestManifestUploadHistoryAndNotify(t *testing.T) {
 
 	var up map[string]string
 	resp := e.post(t, "/api/upload/manifest", map[string]interface{}{
-		"manifest_hash": hash, "manifest_data": []byte("enc"), "max_retrievals": 2,
+		"manifest_hash": hash, "manifest_data": []byte("enc"), "max_retrievals": 2, "ack_hash": strings.Repeat("ac", 32),
 		"transfer_name": "weights", "files": 3, "total_bytes": 1234,
 	}, alice)
 	decode(t, resp, &up)
@@ -446,5 +471,86 @@ func TestSPAFallback(t *testing.T) {
 	}
 	if code, _ := get("/api/nope"); code != 404 {
 		t.Errorf("/api/nope: %d", code)
+	}
+}
+
+func TestSegmentUploadRequiresDeleteToken(t *testing.T) {
+	e := newTestEnv(t)
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/api/upload/segment", bytes.NewReader(make([]byte, 100)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestSegmentUploadFailsOver(t *testing.T) {
+	// The first configured node is down; its shards must go to the other one.
+	down := httptest.NewServer(http.NotFoundHandler())
+	downURL := down.URL
+	down.Close()
+	e := newTestEnv(t, StorageNode{Internal: downURL, Public: "http://down.example:7001"})
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	segment := make([]byte, 5000)
+	rand.Read(segment)
+	var up SegmentUploadResponse
+	resp := e.post(t, "/api/upload/segment", segment, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("upload: %d", resp.StatusCode)
+	}
+	decode(t, resp, &up)
+	for _, sh := range up.Shards {
+		if sh.Node != publicNode {
+			t.Fatalf("shard %d recorded on %s", sh.Index, sh.Node)
+		}
+	}
+	if len(e.node.shards) != TotalShards {
+		t.Fatalf("healthy node holds %d shards", len(e.node.shards))
+	}
+
+	// The next segment skips the failed node instead of retrying it.
+	start := time.Now()
+	resp = e.post(t, "/api/upload/segment", segment[:4000], "")
+	resp.Body.Close()
+	if resp.StatusCode != 200 || time.Since(start) > time.Second {
+		t.Fatalf("second segment: status %d after %s", resp.StatusCode, time.Since(start))
+	}
+}
+
+func TestAck(t *testing.T) {
+	e := newTestEnv(t)
+	hash := strings.Repeat("ab", 32)
+	secret := bytes.Repeat([]byte{5}, 32)
+	sum := blake3.Sum256(secret)
+	e.relay.manifests[hash] = []byte("enc")
+	e.relay.ackHashes[hash] = hex.EncodeToString(sum[:])
+
+	// Fetching doesn't consume the manifest...
+	for i := 0; i < 2; i++ {
+		resp := e.post(t, "/api/download", map[string]string{"manifest_hash": hash}, "")
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("fetch %d: %d", i, resp.StatusCode)
+		}
+	}
+	// ...a wrong secret is refused...
+	resp := e.post(t, "/api/download/ack", map[string]string{"manifest_hash": hash, "ack_secret": strings.Repeat("00", 32)}, "")
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("wrong secret: %d", resp.StatusCode)
+	}
+	// ...and the right one consumes it.
+	resp = e.post(t, "/api/download/ack", map[string]string{"manifest_hash": hash, "ack_secret": hex.EncodeToString(secret)}, "")
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("ack: %d", resp.StatusCode)
+	}
+	if _, ok := e.relay.manifests[hash]; ok {
+		t.Fatal("manifest not consumed")
 	}
 }

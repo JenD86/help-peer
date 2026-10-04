@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"lukechampine.com/blake3"
 )
 
 var testHash = strings.Repeat("ab", 32)
@@ -20,8 +23,10 @@ func newTestRelay(t *testing.T) (*Relay, *httptest.Server) {
 		started:          time.Now(),
 		ttl:              time.Hour,
 		maxManifestBytes: 1024,
+		maxTotalBytes:    4096,
 		defaultRetrieval: 1,
 		misses:           newRateLimiter(3, time.Minute),
+		puts:             newRateLimiter(100, time.Minute),
 	}
 	srv := httptest.NewServer(r.routes())
 	t.Cleanup(srv.Close)
@@ -42,7 +47,8 @@ func do(t *testing.T, method, url string, body []byte, headers map[string]string
 	return resp
 }
 
-func TestPutGetOneTime(t *testing.T) {
+// Manifests without X-Ack-Hash (older clients) are consumed on fetch.
+func TestLegacyPutGetOneTime(t *testing.T) {
 	_, srv := newTestRelay(t)
 	url := srv.URL + "/manifest/" + testHash
 
@@ -145,5 +151,83 @@ func TestHealthCountsManifestsOnly(t *testing.T) {
 	relay.walkManifests(func(string) { count++ })
 	if count != 1 {
 		t.Fatalf("expected 1 manifest, counted %d", count)
+	}
+}
+
+func ackHashOf(secret []byte) string {
+	sum := blake3.Sum256(secret)
+	return hex.EncodeToString(sum[:])
+}
+
+func TestAckConsumesManifest(t *testing.T) {
+	_, srv := newTestRelay(t)
+	url := srv.URL + "/manifest/" + testHash
+	secret := bytes.Repeat([]byte{7}, 32)
+	do(t, "PUT", url, []byte("data"), map[string]string{"X-Ack-Hash": ackHashOf(secret)})
+
+	// Fetching doesn't consume it, so a failed download can be retried.
+	for i := 0; i < 3; i++ {
+		if r := do(t, "GET", url, nil, nil); r.StatusCode != 200 {
+			t.Fatalf("get %d: %d", i, r.StatusCode)
+		}
+	}
+	if r := do(t, "POST", url+"/ack", []byte(hex.EncodeToString(bytes.Repeat([]byte{8}, 32))), nil); r.StatusCode != 403 {
+		t.Fatalf("wrong secret: %d", r.StatusCode)
+	}
+	if r := do(t, "POST", url+"/ack", []byte("not hex"), nil); r.StatusCode != 400 {
+		t.Fatalf("malformed secret: %d", r.StatusCode)
+	}
+	if r := do(t, "POST", url+"/ack", []byte(hex.EncodeToString(secret)), nil); r.StatusCode != 204 {
+		t.Fatalf("ack: %d", r.StatusCode)
+	}
+	if r := do(t, "GET", url, nil, nil); r.StatusCode != 404 {
+		t.Fatalf("get after ack: %d", r.StatusCode)
+	}
+}
+
+func TestAckCountsRetrievals(t *testing.T) {
+	_, srv := newTestRelay(t)
+	url := srv.URL + "/manifest/" + testHash
+	secret := bytes.Repeat([]byte{7}, 32)
+	do(t, "PUT", url, []byte("data"), map[string]string{"X-Ack-Hash": ackHashOf(secret), "X-Max-Retrievals": "2"})
+
+	for i, want := range []int{204, 204, 404} {
+		if r := do(t, "POST", url+"/ack", []byte(hex.EncodeToString(secret)), nil); r.StatusCode != want {
+			t.Fatalf("ack %d: got %d want %d", i, r.StatusCode, want)
+		}
+	}
+}
+
+func TestPutRateLimit(t *testing.T) {
+	relay, srv := newTestRelay(t)
+	relay.puts = newRateLimiter(2, time.Minute)
+	codes := []int{}
+	for i := 0; i < 3; i++ {
+		h := strings.Repeat(string("abc"[i]), 64)
+		codes = append(codes, do(t, "PUT", srv.URL+"/manifest/"+h, []byte("x"), nil).StatusCode)
+	}
+	if codes[0] != 201 || codes[1] != 201 || codes[2] != 429 {
+		t.Fatalf("got %v", codes)
+	}
+}
+
+func TestTotalSizeCap(t *testing.T) {
+	relay, srv := newTestRelay(t)
+	big := make([]byte, 1000)
+	codes := []int{}
+	for i := 0; i < 5; i++ {
+		h := strings.Repeat(string("abcde"[i]), 64)
+		codes = append(codes, do(t, "PUT", srv.URL+"/manifest/"+h, big, nil).StatusCode)
+	}
+	if codes[3] != 201 || codes[4] != 507 {
+		t.Fatalf("got %v", codes)
+	}
+	// Space is released when a manifest is consumed.
+	do(t, "GET", srv.URL+"/manifest/"+strings.Repeat("a", 64), nil, nil)
+	if relay.usedBytes != 3000 {
+		t.Fatalf("usedBytes = %d", relay.usedBytes)
+	}
+	if r := do(t, "PUT", srv.URL+"/manifest/"+strings.Repeat("e", 64), big, nil); r.StatusCode != 201 {
+		t.Fatalf("put after freeing space: %d", r.StatusCode)
 	}
 }

@@ -1,5 +1,6 @@
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
+use argon2::{Algorithm, Argon2, Params, Version};
 use blake3;
 use hkdf::Hkdf;
 use rand::RngCore;
@@ -13,22 +14,48 @@ pub const NONCE_SIZE: usize = 12;
 pub const TAG_SIZE: usize = 16;
 pub const KEY_SIZE: usize = 32;
 
+// Argon2id parameters for stretching the transfer code (protocol/SPEC.md §4.1).
+// Every client must use exactly these values.
+pub const ARGON2_SALT: &[u8] = b"help-peer/v2";
+pub const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
+pub const ARGON2_ITERATIONS: u32 = 3;
+pub const ARGON2_PARALLELISM: u32 = 1;
+
 /// Derive K_data and K_index from the transfer code.
 /// Sender and receiver are never online together, so there is no PAKE: the
-/// code itself is the shared secret, and its entropy is the whole security
-/// margin (see upload::CODE_WORDS).
+/// code itself is the shared secret. It is stretched with Argon2id so each
+/// guess is expensive, then split into two keys with HKDF-SHA256.
 pub fn derive_keys(code: &str) -> (Vec<u8>, Vec<u8>) {
     let code = normalize_code(code);
-    let ikm = code.as_bytes();
-    let h = Hkdf::<Sha256>::new(None, ikm);
 
+    let params = Params::new(ARGON2_MEMORY_KIB, ARGON2_ITERATIONS, ARGON2_PARALLELISM, Some(KEY_SIZE))
+        .expect("valid Argon2 parameters");
+    let mut secret = [0u8; KEY_SIZE];
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(code.as_bytes(), ARGON2_SALT, &mut secret)
+        .expect("Argon2id failed");
+
+    let h = Hkdf::<Sha256>::new(None, &secret);
     let mut k_data = [0u8; KEY_SIZE];
     let mut k_index = [0u8; KEY_SIZE];
-
     h.expand(b"help-peer-data-key", &mut k_data).unwrap();
     h.expand(b"help-peer-index-key", &mut k_index).unwrap();
 
     (k_data.to_vec(), k_index.to_vec())
+}
+
+/// A random 32-byte secret, hex-encoded (ack secrets, delete tokens).
+pub fn new_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// BLAKE3 of a hex secret's raw bytes, as given to the relay or a storage
+/// node so it can later check the secret without storing it.
+pub fn secret_hash(secret_hex: &str) -> String {
+    let bytes = hex::decode(secret_hex).expect("secret is hex");
+    hex::encode(blake3::hash(&bytes).as_bytes())
 }
 
 /// Canonicalize a typed-in code so "Apple Banana", " apple-banana " and
@@ -139,5 +166,8 @@ mod tests {
             assert_eq!(hex::encode(&k_index), kd["k_index"].as_str().unwrap());
             assert_eq!(relay_hash(&k_index), kd["relay_hash"].as_str().unwrap());
         }
+
+        let sh = &v["secret_hash"];
+        assert_eq!(secret_hash(sh["secret"].as_str().unwrap()), sh["blake3"].as_str().unwrap());
     }
 }

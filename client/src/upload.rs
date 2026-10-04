@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use tokio::task::JoinSet;
 
@@ -45,6 +47,13 @@ pub async fn upload_path(
     // Build the initial manifest (without shard info)
     let (mut manifest, base_dir) = Manifest::build(path, transfer_name)?;
     let segment_size = manifest.segment_size as usize;
+    manifest.ack_secret = crypto::new_secret();
+    manifest.delete_token = crypto::new_secret();
+    let delete_token_hash = crypto::secret_hash(&manifest.delete_token);
+
+    // Nodes that failed during this transfer; their shards go to the others.
+    let nodes = Arc::new(config.storage_nodes.clone());
+    let dead_nodes: Arc<Mutex<HashSet<usize>>> = Arc::default();
 
     // Process each file
     for file in manifest.files.iter_mut() {
@@ -68,12 +77,16 @@ pub async fn upload_path(
             // Upload the shards in parallel (round-robin node assignment)
             let mut tasks = JoinSet::new();
             for (shard_idx, shard) in shards.into_iter().enumerate() {
-                let hash = crypto::content_hash(&shard);
-                let node = config.storage_nodes[shard_idx % config.storage_nodes.len()].clone();
                 let client = client.clone();
+                let nodes = nodes.clone();
+                let dead_nodes = dead_nodes.clone();
+                let delete_token_hash = delete_token_hash.clone();
                 tasks.spawn(async move {
-                    let url = format!("{}/shard/{}", node, hash);
-                    http::put(&client, &url, &shard, &[], &format!("shard upload to {}", node)).await?;
+                    let hash = crypto::content_hash(&shard);
+                    let node = upload_shard_with_failover(
+                        &client, &nodes, &dead_nodes, shard_idx, &hash, &shard, &delete_token_hash,
+                    )
+                    .await?;
                     Ok::<_, String>(ManifestShard {
                         index: shard_idx as u8,
                         hash,
@@ -96,13 +109,53 @@ pub async fn upload_path(
         file.blake3 = Some(hex::encode(file_hasher.finalize().as_bytes()));
     }
 
+    let failed: Vec<&str> = dead_nodes.lock().unwrap().iter().map(|&i| nodes[i].as_str()).collect();
+    if !failed.is_empty() {
+        eprintln!(
+            "warning: storage node(s) {} failed; their shards were stored on the remaining nodes, \
+             so this transfer tolerates fewer node failures",
+            failed.join(", ")
+        );
+    }
+
     // Encrypt and upload the manifest to the relay
     let manifest_json = manifest.to_json()?;
     let encrypted_manifest = crypto::encrypt_segment(&k_data, &manifest_json);
     let url = format!("{}/manifest/{}", config.relay_url, relay_hash);
-    http::put(&client, &url, &encrypted_manifest, &[], "manifest upload").await?;
+    let ack_hash = crypto::secret_hash(&manifest.ack_secret);
+    http::put(&client, &url, &encrypted_manifest, &[("X-Ack-Hash", &ack_hash)], "manifest upload").await?;
 
     Ok((code, manifest))
+}
+
+/// Upload a shard to its round-robin node, falling back to the next healthy
+/// node if that one fails. Returns the URL of the node that stored it.
+async fn upload_shard_with_failover(
+    client: &reqwest::Client,
+    nodes: &[String],
+    dead_nodes: &Mutex<HashSet<usize>>,
+    shard_idx: usize,
+    hash: &str,
+    shard: &[u8],
+    delete_token_hash: &str,
+) -> Result<String, String> {
+    let mut last_err = String::from("all storage nodes have failed");
+    for offset in 0..nodes.len() {
+        let i = (shard_idx + offset) % nodes.len();
+        if dead_nodes.lock().unwrap().contains(&i) {
+            continue;
+        }
+        let url = format!("{}/shard/{}", nodes[i], hash);
+        let headers = [("X-Delete-Token-Hash", delete_token_hash)];
+        match http::put(client, &url, shard, &headers, &format!("shard upload to {}", nodes[i])).await {
+            Ok(()) => return Ok(nodes[i].clone()),
+            Err(e) => {
+                dead_nodes.lock().unwrap().insert(i);
+                last_err = e;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// Number of words in a transfer code. Each word from the 7776-word EFF

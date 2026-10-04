@@ -28,7 +28,12 @@ Content-Length: {n}
 
 `{hash}` = lowercase hex-encoded `BLAKE3(K_index)` (64 characters), where `K_index` is derived from the transfer code (section 4.1).
 
-Optional header `X-Max-Retrievals: {n}` (1–1000) lets the manifest be fetched `n` times, e.g. once per recipient. Manifests expire after the relay's TTL (default 24 hours).
+Headers:
+
+* `X-Ack-Hash: {hex}` — `BLAKE3(ack_secret)`, where `ack_secret` is the 32-byte secret in the manifest (section 3). Required by current clients; see 1.3.
+* `X-Max-Retrievals: {n}` (optional, 1–1000) — how many receivers may confirm the manifest, e.g. one per recipient.
+
+Manifests expire after the relay's TTL (default 24 hours).
 
 **Response (success):**
 ```
@@ -50,9 +55,22 @@ HTTP/1.1 400 Bad Request
 HTTP/1.1 413 Request Entity Too Large
 ```
 
+**Response (too many uploads from this client):**
+```
+HTTP/1.1 429 Too Many Requests
+```
+
+**Response (relay's total storage cap reached):**
+```
+HTTP/1.1 507 Insufficient Storage
+```
+
 ### 1.2 GET /manifest/{hash}
 
-Retrieve and atomically delete the manifest (one-time retrieval).
+Retrieve the manifest. Fetching does **not** consume it, so a receiver whose
+download fails can retry with the same code; it is consumed by confirming
+(1.3). Manifests uploaded without `X-Ack-Hash` (older clients) are instead
+consumed by each fetch.
 
 **Request:**
 ```
@@ -78,7 +96,32 @@ HTTP/1.1 404 Not Found
 HTTP/1.1 429 Too Many Requests
 ```
 
-### 1.3 GET /health
+### 1.3 POST /manifest/{hash}/ack
+
+Confirm a completed, verified download. Uses up one retrieval; the manifest
+is deleted after the last one.
+
+**Request:**
+```
+POST /manifest/{hash}/ack HTTP/1.1
+
+{hex ack_secret}
+```
+
+The relay checks `BLAKE3(ack_secret)` against the `X-Ack-Hash` given at
+upload, which proves the caller decrypted the manifest. Receivers must only
+send this after every file has been verified, and must not retry it after
+the request may have reached the relay (it isn't idempotent).
+
+| Response | Meaning |
+|---|---|
+| `204 No Content` | Confirmed |
+| `400 Bad Request` | Body is not a 32-byte hex secret |
+| `403 Forbidden` | Wrong secret (counts as a failed lookup for rate limiting) |
+| `404 Not Found` | No such manifest, or expired |
+| `429 Too Many Requests` | Too many failed lookups from this client |
+
+### 1.4 GET /health
 
 **Response:**
 ```json
@@ -108,6 +151,10 @@ X-TTL-Seconds: 86400
 ```
 
 `{hash}` = lowercase hex-encoded `BLAKE3(shard_bytes)`. The node verifies it and rejects content that doesn't match, so a hash can't be claimed by different data. `X-TTL-Seconds` can only shorten the node's TTL.
+
+`X-Delete-Token-Hash: {hex}` registers `BLAKE3(delete_token)` (the 32-byte token in the manifest, section 3) as the only credential that can delete the shard early (2.3). If a shard with the same content already exists, its original token is kept.
+
+If a node fails during upload, the sender stores that node's shards on the next healthy node instead and records the node actually used in the manifest.
 
 **Response (success):**
 ```
@@ -159,17 +206,21 @@ HTTP/1.1 404 Not Found
 
 ### 2.3 DELETE /shard/{hash}
 
-Delete a shard after successful transfer.
+Delete a shard before its TTL. Requires the transfer's delete token, so
+only someone holding the decrypted manifest can delete its shards; shards
+stored without a token can't be deleted early at all.
 
 **Request:**
 ```
 DELETE /shard/{hash} HTTP/1.1
+X-Delete-Token: {hex delete_token}
 ```
 
-**Response:**
-```
-HTTP/1.1 204 No Content
-```
+| Response | Meaning |
+|---|---|
+| `204 No Content` | Deleted |
+| `403 Forbidden` | Missing or wrong token, or the shard has no token |
+| `404 Not Found` | No such shard |
 
 ### 2.4 GET /health
 
@@ -193,8 +244,10 @@ The manifest is a JSON object created by the sender, encrypted with `K_data` (AE
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "transfer_name": "Llama-3-70B-Instruct-Safetensors",
+  "ack_secret": "hex...",
+  "delete_token": "hex...",
   "total_bytes": 140000000000,
   "segment_size": 67108864,
   "erasure_data_shards": 8,
@@ -240,8 +293,10 @@ The manifest is a JSON object created by the sender, encrypted with `K_data` (AE
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | int | Protocol version (currently 1) |
+| `version` | int | Protocol version (currently 2: Argon2id key derivation, `ack_secret`, `delete_token`) |
 | `transfer_name` | string | Human-readable name for the transfer |
+| `ack_secret` | string | Random 32 bytes, hex; presented to the relay to confirm the download (1.3) |
+| `delete_token` | string | Random 32 bytes, hex; authorizes deleting the transfer's shards (2.3) |
 | `total_bytes` | u64 | Total size of all files combined |
 | `segment_size` | u32 | Segment size in bytes (default 67108864 = 64MB) |
 | `erasure_data_shards` | u8 | Number of data shards per segment (default 8) |
@@ -270,10 +325,15 @@ Sender and receiver are never online at the same time, so an interactive PAKE
 `S`, which is why codes must carry enough entropy to resist offline guessing
 (see section 6).
 
-1. `S = normalize(code)` — lowercase, with runs of whitespace or `-` collapsed to a single `-`.
-2. `K_data = HKDF-SHA256(ikm=S, salt=none, info="help-peer-data-key")` — 32 bytes, used for AES-256-GCM encryption.
-3. `K_index = HKDF-SHA256(ikm=S, salt=none, info="help-peer-index-key")` — 32 bytes, used for relay routing.
-4. `relay_hash = BLAKE3(K_index)` — hex-encoded, used as the manifest key on the relay.
+1. `P = normalize(code)` — lowercase, with runs of whitespace or `-` collapsed to a single `-`.
+2. `S = Argon2id(password=P, salt="help-peer/v2", memory=65536 KiB, iterations=3, parallelism=1, length=32)` (Argon2 version 0x13). This makes every guess cost ~64 MiB and a fraction of a second, on top of the code's ~77 bits of entropy.
+3. `K_data = HKDF-SHA256(ikm=S, salt=none, info="help-peer-data-key")` — 32 bytes, used for AES-256-GCM encryption.
+4. `K_index = HKDF-SHA256(ikm=S, salt=none, info="help-peer-index-key")` — 32 bytes, used for relay routing.
+5. `relay_hash = BLAKE3(K_index)` — hex-encoded, used as the manifest key on the relay.
+
+`ack_secret` and `delete_token` are separate random values, not derived from
+the code; the relay and storage nodes store only their BLAKE3 hashes
+(`BLAKE3` of the raw 32 bytes, hex-encoded).
 
 ### 4.2 Segment Encryption
 

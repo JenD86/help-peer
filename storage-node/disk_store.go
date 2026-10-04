@@ -34,7 +34,7 @@ func NewDiskStore(dataDir string, ttlSeconds int64) (*DiskStore, error) {
 	return ds, nil
 }
 
-func (d *DiskStore) Put(hash string, data io.Reader, ttl time.Duration) (int64, error) {
+func (d *DiskStore) Put(hash string, data io.Reader, ttl time.Duration, deleteTokenHash string) (int64, error) {
 	shardPath := d.shardPath(hash)
 
 	// Check if shard already exists (dedup)
@@ -60,8 +60,18 @@ func (d *DiskStore) Put(hash string, data io.Reader, ttl time.Duration) (int64, 
 		return 0, err
 	}
 
+	// The delete-token hash lives in a sidecar file, written before the
+	// shard appears so a visible shard always has its token.
+	if deleteTokenHash != "" {
+		if err := os.WriteFile(shardPath+deleteTokenSuffix, []byte(deleteTokenHash), 0644); err != nil {
+			os.Remove(tmpPath)
+			return 0, err
+		}
+	}
+
 	if err := os.Rename(tmpPath, shardPath); err != nil {
 		os.Remove(tmpPath)
+		os.Remove(shardPath + deleteTokenSuffix)
 		return 0, err
 	}
 
@@ -94,6 +104,7 @@ func (d *DiskStore) Delete(hash string) error {
 	shardPath := d.shardPath(hash)
 	if info, err := os.Stat(shardPath); err == nil {
 		os.Remove(shardPath)
+		os.Remove(shardPath + deleteTokenSuffix)
 		d.mu.Lock()
 		d.usedBytes -= info.Size()
 		if d.usedBytes < 0 {
@@ -103,6 +114,17 @@ func (d *DiskStore) Delete(hash string) error {
 		d.mu.Unlock()
 	}
 	return nil
+}
+
+// deleteTokenSuffix names the sidecar file holding a shard's delete-token hash.
+const deleteTokenSuffix = ".del"
+
+func (d *DiskStore) DeleteTokenHash(hash string) (string, error) {
+	data, err := os.ReadFile(d.shardPath(hash) + deleteTokenSuffix)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return string(data), err
 }
 
 func (d *DiskStore) Exists(hash string) (int64, error) {
@@ -181,6 +203,13 @@ func (d *DiskStore) rebuildIndex(ttlSeconds int64) {
 		// Leftovers from an interrupted upload.
 		if strings.HasSuffix(path, ".tmp") {
 			os.Remove(path)
+			return nil
+		}
+		if strings.HasSuffix(path, deleteTokenSuffix) {
+			// Sidecar of a shard; drop it if the shard itself is gone.
+			if _, err := os.Stat(strings.TrimSuffix(path, deleteTokenSuffix)); os.IsNotExist(err) {
+				os.Remove(path)
+			}
 			return nil
 		}
 		total += info.Size()

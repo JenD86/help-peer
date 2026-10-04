@@ -63,6 +63,11 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusBadRequest, "segment too small")
 		return
 	}
+	deleteTokenHash := req.Header.Get("X-Delete-Token-Hash")
+	if !isHexHash(deleteTokenHash) {
+		writeError(w, http.StatusBadRequest, "X-Delete-Token-Hash required")
+		return
+	}
 
 	enc, err := reedsolomon.New(DataShards, ParityShards)
 	if err != nil {
@@ -79,21 +84,22 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Upload the shards in parallel (round-robin node assignment)
+	// Upload the shards in parallel (round-robin node assignment, moving a
+	// failed node's shards to the next healthy node)
 	infos := make([]ShardInfo, len(shards))
 	errs := make([]error, len(shards))
 	var wg sync.WaitGroup
 	for i, shard := range shards {
-		node := s.storageNodes[i%len(s.storageNodes)]
 		sum := blake3.Sum256(shard)
 		hash := hex.EncodeToString(sum[:])
-		infos[i] = ShardInfo{Index: i, Hash: hash, Node: node.Public}
 
 		wg.Add(1)
-		go func(i int, nodeURL, hash string, shard []byte) {
+		go func(i int, hash string, shard []byte) {
 			defer wg.Done()
-			errs[i] = uploadShard(nodeURL, hash, shard)
-		}(i, node.Internal, hash, shard)
+			node, err := s.uploadShardWithFailover(i, hash, shard, deleteTokenHash)
+			infos[i] = ShardInfo{Index: i, Hash: hash, Node: node.Public}
+			errs[i] = err
+		}(i, hash, shard)
 	}
 	wg.Wait()
 
@@ -108,11 +114,63 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 	writeJSON(w, http.StatusOK, SegmentUploadResponse{EncryptedSize: len(data), Shards: infos})
 }
 
+// nodeHealth remembers storage nodes that recently failed, so later
+// segments skip them instead of waiting through retries every time.
+type nodeHealth struct {
+	mu        sync.Mutex
+	downUntil map[int]time.Time
+}
+
+const nodeDownFor = time.Minute
+
+func (h *nodeHealth) isDown(i int) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return time.Now().Before(h.downUntil[i])
+}
+
+func (h *nodeHealth) markDown(i int) {
+	h.mu.Lock()
+	h.downUntil[i] = time.Now().Add(nodeDownFor)
+	h.mu.Unlock()
+}
+
+// uploadShardWithFailover stores a shard on its round-robin node, falling
+// back to the next healthy node if that one fails. Nodes marked down are
+// tried last rather than never, in case they have recovered.
+func (s *Server) uploadShardWithFailover(idx int, hash string, shard []byte, deleteTokenHash string) (StorageNode, error) {
+	var healthy, down []int
+	for offset := range s.storageNodes {
+		i := (idx + offset) % len(s.storageNodes)
+		if s.health.isDown(i) {
+			down = append(down, i)
+		} else {
+			healthy = append(healthy, i)
+		}
+	}
+
+	lastErr := fmt.Errorf("no storage nodes configured")
+	for _, i := range append(healthy, down...) {
+		node := s.storageNodes[i]
+		_, err := putWithRetry(node.Internal+"/shard/"+hash, shard, map[string]string{
+			"X-Delete-Token-Hash": deleteTokenHash,
+		})
+		if err == nil {
+			return node, nil
+		}
+		log.Printf("Storage node %s failed: %v", node.Internal, err)
+		s.health.markDown(i)
+		lastErr = err
+	}
+	return StorageNode{}, lastErr
+}
+
 // ManifestUploadRequest carries the browser-encrypted manifest plus the
 // plaintext details shown in the sender's history.
 type ManifestUploadRequest struct {
 	ManifestHash  string `json:"manifest_hash"` // BLAKE3(K_index) hex
 	ManifestData  []byte `json:"manifest_data"` // encrypted manifest (base64 in JSON)
+	AckHash       string `json:"ack_hash"`      // BLAKE3 of the manifest's ack secret
 	MaxRetrievals int    `json:"max_retrievals"`
 	TransferName  string `json:"transfer_name"`
 	Files         int    `json:"files"`
@@ -122,6 +180,13 @@ type ManifestUploadRequest struct {
 func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// The relay sees every web user as this server's address, so limit
+	// uploads per client here.
+	if !s.manifestUploads.Allow(clientIP(req), 1) {
+		writeError(w, http.StatusTooManyRequests, "too many uploads, try again later")
 		return
 	}
 
@@ -136,6 +201,10 @@ func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid manifest hash")
 		return
 	}
+	if !isHexHash(body.AckHash) {
+		writeError(w, http.StatusBadRequest, "invalid ack hash")
+		return
+	}
 	if len(body.ManifestData) == 0 {
 		writeError(w, http.StatusBadRequest, "empty manifest")
 		return
@@ -148,7 +217,7 @@ func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	status, err := uploadManifest(s.relayURL, body.ManifestHash, body.ManifestData, body.MaxRetrievals)
+	status, err := uploadManifest(s.relayURL, body.ManifestHash, body.ManifestData, body.MaxRetrievals, body.AckHash)
 	if err != nil {
 		log.Printf("Manifest upload error: %v", err)
 		if status == http.StatusConflict {
@@ -221,13 +290,9 @@ func putWithRetry(url string, data []byte, headers map[string]string) (int, erro
 	return 0, lastErr
 }
 
-func uploadShard(nodeURL, hash string, data []byte) error {
-	_, err := putWithRetry(nodeURL+"/shard/"+hash, data, nil)
-	return err
-}
-
-func uploadManifest(relayURL, hash string, data []byte, maxRetrievals int) (int, error) {
+func uploadManifest(relayURL, hash string, data []byte, maxRetrievals int, ackHash string) (int, error) {
 	return putWithRetry(relayURL+"/manifest/"+hash, data, map[string]string{
 		"X-Max-Retrievals": fmt.Sprintf("%d", maxRetrievals),
+		"X-Ack-Hash":       ackHash,
 	})
 }

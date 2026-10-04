@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,7 +114,7 @@ func TestRestartKeepsOriginalExpiry(t *testing.T) {
 	store, _ := NewDiskStore(dir, 3600)
 	data := []byte("old shard")
 	h := hashOf(data)
-	store.Put(h, bytes.NewReader(data), time.Hour)
+	store.Put(h, bytes.NewReader(data), time.Hour, "")
 	os.WriteFile(store.shardPath(h)+".tmp", []byte("partial"), 0644)
 
 	// Pretend it was stored two hours ago.
@@ -126,5 +127,67 @@ func TestRestartKeepsOriginalExpiry(t *testing.T) {
 	}
 	if _, err := os.Stat(store.shardPath(h) + ".tmp"); !os.IsNotExist(err) {
 		t.Fatal("stale .tmp file not cleaned up")
+	}
+}
+
+func send(t *testing.T, method, url string, body []byte, headers map[string]string) int {
+	t.Helper()
+	req, _ := http.NewRequest(method, url, bytes.NewReader(body))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestDeleteRequiresToken(t *testing.T) {
+	_, store, base := newTestNode(t, 1<<20)
+	token := bytes.Repeat([]byte{9}, 32)
+	data := []byte("deletable")
+	url := base + "/shard/" + hashOf(data)
+
+	if code := send(t, "PUT", url, data, map[string]string{"X-Delete-Token-Hash": hashOf(token)}); code != 201 {
+		t.Fatalf("put: %d", code)
+	}
+	if code := send(t, "DELETE", url, nil, nil); code != 403 {
+		t.Fatalf("delete without token: %d", code)
+	}
+	if code := send(t, "DELETE", url, nil, map[string]string{"X-Delete-Token": hex.EncodeToString(bytes.Repeat([]byte{1}, 32))}); code != 403 {
+		t.Fatalf("delete with wrong token: %d", code)
+	}
+	if code := send(t, "DELETE", url, nil, map[string]string{"X-Delete-Token": hex.EncodeToString(token)}); code != 204 {
+		t.Fatalf("delete with token: %d", code)
+	}
+	if code := send(t, "DELETE", url, nil, map[string]string{"X-Delete-Token": hex.EncodeToString(token)}); code != 404 {
+		t.Fatalf("delete again: %d", code)
+	}
+	if _, err := os.Stat(store.shardPath(hashOf(data)) + deleteTokenSuffix); !os.IsNotExist(err) {
+		t.Fatal("token sidecar left behind")
+	}
+}
+
+func TestShardsWithoutTokenCannotBeDeleted(t *testing.T) {
+	_, _, base := newTestNode(t, 1<<20)
+	data := []byte("legacy shard")
+	url := base + "/shard/" + hashOf(data)
+	send(t, "PUT", url, data, nil)
+	if code := send(t, "DELETE", url, nil, map[string]string{"X-Delete-Token": hex.EncodeToString(bytes.Repeat([]byte{9}, 32))}); code != 403 {
+		t.Fatalf("expected 403, got %d", code)
+	}
+}
+
+func TestTokenSidecarNotCountedAsShard(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := NewDiskStore(dir, 3600)
+	data := []byte("with token")
+	store.Put(hashOf(data), bytes.NewReader(data), time.Hour, strings.Repeat("ab", 32))
+
+	restarted, _ := NewDiskStore(dir, 3600)
+	if restarted.ShardCount() != 1 || restarted.UsedBytes() != int64(len(data)) {
+		t.Fatalf("count=%d used=%d", restarted.ShardCount(), restarted.UsedBytes())
 	}
 }

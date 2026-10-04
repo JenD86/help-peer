@@ -46,11 +46,15 @@ export async function logout(): Promise<void> {
   await request('/api/auth/logout', { method: 'POST' })
 }
 
-// Upload one encrypted segment; the server erasure-codes it and stores the shards.
-export async function uploadSegment(encrypted: ArrayBuffer): Promise<{ encrypted_size: number; shards: ShardInfo[] }> {
+// Upload one encrypted segment; the server erasure-codes it and stores the
+// shards, registering deleteTokenHash so only manifest holders can delete them.
+export async function uploadSegment(
+  encrypted: ArrayBuffer,
+  deleteTokenHash: string
+): Promise<{ encrypted_size: number; shards: ShardInfo[] }> {
   const resp = await request('/api/upload/segment', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
+    headers: { 'Content-Type': 'application/octet-stream', 'X-Delete-Token-Hash': deleteTokenHash },
     body: encrypted,
   })
   return resp.json()
@@ -59,6 +63,7 @@ export async function uploadSegment(encrypted: ArrayBuffer): Promise<{ encrypted
 export async function uploadManifest(params: {
   manifestHash: string
   manifestData: ArrayBuffer
+  ackHash: string
   maxRetrievals: number
   transferName: string
   files: number
@@ -67,6 +72,7 @@ export async function uploadManifest(params: {
   const resp = await postJSON('/api/upload/manifest', {
     manifest_hash: params.manifestHash,
     manifest_data: arrayBufferToBase64(params.manifestData),
+    ack_hash: params.ackHash,
     max_retrievals: params.maxRetrievals,
     transfer_name: params.transferName,
     files: params.files,
@@ -79,6 +85,12 @@ export async function downloadManifest(manifestHash: string): Promise<ArrayBuffe
   const resp = await postJSON('/api/download', { manifest_hash: manifestHash })
   const data = await resp.json()
   return base64ToArrayBuffer(data.manifest_data)
+}
+
+// Confirm a completed, verified download. This uses up one of the
+// transfer's retrievals; until then the code can be retried.
+export async function ackDownload(manifestHash: string, ackSecret: string): Promise<void> {
+  await postJSON('/api/download/ack', { manifest_hash: manifestHash, ack_secret: ackSecret })
 }
 
 // Fetch one segment, rebuilt from its shards by the server (still encrypted).

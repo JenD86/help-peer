@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/klauspost/reedsolomon"
 	"lukechampine.com/blake3"
@@ -198,6 +199,57 @@ func (s *Server) segmentDownloadHandler(w http.ResponseWriter, req *http.Request
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(buf)
+}
+
+// AckRequest confirms a completed, verified download.
+type AckRequest struct {
+	ManifestHash string `json:"manifest_hash"`
+	AckSecret    string `json:"ack_secret"` // hex, from inside the decrypted manifest
+}
+
+func (s *Server) ackHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ip := clientIP(req)
+	if s.manifestMisses.Exceeded(ip) {
+		writeError(w, http.StatusTooManyRequests, "too many failed requests, try again later")
+		return
+	}
+
+	var body AckRequest
+	req.Body = http.MaxBytesReader(w, req.Body, 4096)
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if !isHexHash(body.ManifestHash) || !isHexHash(body.AckSecret) {
+		writeError(w, http.StatusBadRequest, "invalid manifest hash or ack secret")
+		return
+	}
+
+	// Not retried: a confirmation isn't idempotent.
+	resp, err := httpClient.Post(s.relayURL+"/manifest/"+body.ManifestHash+"/ack",
+		"text/plain", strings.NewReader(body.AckSecret))
+	if err != nil {
+		log.Printf("Ack error: %v", err)
+		writeError(w, http.StatusBadGateway, "relay unavailable")
+		return
+	}
+	resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	case http.StatusNotFound, http.StatusForbidden:
+		s.manifestMisses.Hit(ip)
+		writeError(w, resp.StatusCode, "transfer not found or wrong ack secret")
+	case http.StatusTooManyRequests:
+		writeError(w, http.StatusTooManyRequests, "relay is rate limiting, try again later")
+	default:
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("relay returned %d", resp.StatusCode))
+	}
 }
 
 func downloadManifest(relayURL, hash string) ([]byte, int, error) {

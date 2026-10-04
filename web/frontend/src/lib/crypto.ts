@@ -2,9 +2,10 @@
  * Browser-side crypto for Help Peer.
  * Implements the same scheme as the Rust CLI and Python SDK (protocol/SPEC.md),
  * so codes work across all clients: HKDF-SHA256 and AES-256-GCM via WebCrypto,
- * BLAKE3 via @noble/hashes.
+ * BLAKE3 via @noble/hashes, Argon2id via hash-wasm.
  */
 import { blake3 } from '@noble/hashes/blake3'
+import { argon2id } from 'hash-wasm'
 import wordlistText from './wordlist.txt?raw'
 
 const enc = new TextEncoder()
@@ -15,11 +16,24 @@ export function normalizeCode(code: string): string {
   return code.split(/[-\s]+/).filter(w => w.length > 0).map(w => w.toLowerCase()).join('-')
 }
 
-// K_data / K_index = HKDF-SHA256(ikm = code, no salt, info = label). There is
-// no PAKE: sender and receiver are never online together, so the code itself
-// is the shared secret.
+// Argon2id parameters for stretching the transfer code (protocol/SPEC.md §4.1).
+// Every client must use exactly these values.
+const ARGON2 = { salt: 'help-peer/v2', memorySize: 64 * 1024, iterations: 3, parallelism: 1 }
+
+// There is no PAKE (sender and receiver are never online together), so the
+// code itself is the shared secret. It is stretched with Argon2id so each
+// guess is expensive, then split into K_data / K_index with HKDF-SHA256.
 export async function deriveKeys(code: string): Promise<{ kData: ArrayBuffer; kIndex: ArrayBuffer }> {
-  const ikm = await crypto.subtle.importKey('raw', enc.encode(normalizeCode(code)), 'HKDF', false, ['deriveBits'])
+  const secret = await argon2id({
+    password: normalizeCode(code),
+    salt: enc.encode(ARGON2.salt),
+    memorySize: ARGON2.memorySize,
+    iterations: ARGON2.iterations,
+    parallelism: ARGON2.parallelism,
+    hashLength: 32,
+    outputType: 'binary',
+  })
+  const ikm = await crypto.subtle.importKey('raw', new Uint8Array(secret), 'HKDF', false, ['deriveBits'])
   const derive = (info: string) =>
     crypto.subtle.deriveBits(
       { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode(info) },
@@ -27,6 +41,18 @@ export async function deriveKeys(code: string): Promise<{ kData: ArrayBuffer; kI
       256
     )
   return { kData: await derive('help-peer-data-key'), kIndex: await derive('help-peer-index-key') }
+}
+
+// A random 32-byte secret, hex-encoded (ack secrets, delete tokens).
+export function newSecret(): string {
+  return toHex(crypto.getRandomValues(new Uint8Array(32)))
+}
+
+// BLAKE3 of a hex secret's raw bytes, as given to the relay or a storage
+// node so it can later check the secret without storing it.
+export function secretHash(secretHex: string): string {
+  const bytes = new Uint8Array(secretHex.match(/../g)!.map(h => parseInt(h, 16)))
+  return toHex(blake3(bytes))
 }
 
 // Relay hash = BLAKE3(K_index) hex-encoded

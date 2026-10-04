@@ -99,7 +99,7 @@ class TestManifest:
         m, base = manifest.build_manifest(str(tmp_path), "test-transfer", 67108864)
         assert base == str(tmp_path)
         assert m.transfer_name == "test-transfer"
-        assert m.version == 1
+        assert m.version == manifest.MANIFEST_VERSION
         assert [f.path for f in m.files] == ["config.json", "sub/model.safetensors"]
         assert m.total_bytes == 9
 
@@ -166,6 +166,9 @@ class TestManifest:
         lambda m: m.files[0].segments[0].shards.extend(
             [manifest.ManifestShard(1, "ab" * 32, "n"), manifest.ManifestShard(1, "ab" * 32, "n")]),
         lambda m: setattr(m.files[0], "blake3", "zz"),
+        lambda m: setattr(m, "version", 1),
+        lambda m: setattr(m, "ack_secret", ""),
+        lambda m: setattr(m, "delete_token", "x"),
     ])
     def test_validate_rejects_inconsistent_manifests(self, mutate):
         m = _valid_manifest()
@@ -177,6 +180,7 @@ class TestManifest:
 def _valid_manifest():
     return manifest.Manifest(
         transfer_name="t", total_bytes=100, segment_size=64,
+        ack_secret="cd" * 32, delete_token="ef" * 32,
         files=[manifest.ManifestFile(path="a", size=100, segments=[
             manifest.ManifestSegment(id="seg_000000", original_size=64, encrypted_size=92),
             manifest.ManifestSegment(id="seg_000001", original_size=36, encrypted_size=64),
@@ -267,6 +271,10 @@ class TestSharedVectors:
             assert k_data.hex() == kd["k_data"]
             assert k_index.hex() == kd["k_index"]
             assert crypto.relay_hash(k_index) == kd["relay_hash"]
+
+    def test_secret_hash(self):
+        sh = self.v["secret_hash"]
+        assert crypto.secret_hash(sh["secret"]) == sh["blake3"]
 
     def test_erasure(self):
         e = self.v["erasure"]

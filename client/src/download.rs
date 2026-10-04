@@ -13,6 +13,9 @@ use crate::validator::ValidatorRegistry;
 pub struct DownloadResult {
     pub manifest: Manifest,
     pub file_hashes: Vec<(String, String)>,
+    /// Whether the relay accepted our confirmation. If it didn't, the
+    /// manifest simply stays until it expires.
+    pub acknowledged: bool,
 }
 
 /// Download and reconstruct a transfer using a code.
@@ -25,9 +28,10 @@ pub async fn download_transfer(
     let (k_data, k_index) = crypto::derive_keys(code);
     let relay_hash = crypto::relay_hash(&k_index);
 
-    // Download encrypted manifest from relay (one-time retrieval)
-    let url = format!("{}/manifest/{}", relay_url, relay_hash);
-    let encrypted_manifest = http::get(&client, &url, "manifest download")
+    // Download encrypted manifest from relay. It stays there until we
+    // confirm success below, so a failed download can be retried.
+    let manifest_url = format!("{}/manifest/{}", relay_url, relay_hash);
+    let encrypted_manifest = http::get(&client, &manifest_url, "manifest download")
         .await?
         .ok_or("transfer not found: the code is wrong, it expired, or it was already received")?;
 
@@ -89,9 +93,22 @@ pub async fn download_transfer(
         file_hashes.push((file.path.clone(), hash));
     }
 
+    // Everything verified: confirm, which uses up this recipient's retrieval.
+    let ack = http::post(
+        &client,
+        &format!("{}/ack", manifest_url),
+        manifest.ack_secret.clone().into_bytes(),
+        "download confirmation",
+    )
+    .await;
+    if let Err(e) = &ack {
+        eprintln!("warning: could not confirm the download with the relay ({}); it will expire on its own", e);
+    }
+
     Ok(DownloadResult {
         manifest,
         file_hashes,
+        acknowledged: ack.is_ok(),
     })
 }
 

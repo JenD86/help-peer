@@ -8,6 +8,9 @@ import sys
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+# Version 2 introduced Argon2id key derivation, ack_secret and delete_token.
+MANIFEST_VERSION = 2
+
 NONCE_SIZE = 12
 TAG_SIZE = 16
 # Largest segment size a receiver will accept, to bound memory use.
@@ -43,8 +46,14 @@ class ManifestFile:
 
 @dataclass
 class Manifest:
-    version: int = 1
+    version: int = MANIFEST_VERSION
     transfer_name: str = ""
+    # Hex secret the receiver presents to the relay to confirm a completed
+    # download (the relay only stores its BLAKE3).
+    ack_secret: str = ""
+    # Hex token that authorizes deleting this transfer's shards from storage
+    # nodes (they only store its BLAKE3).
+    delete_token: str = ""
     total_bytes: int = 0
     segment_size: int = 67108864
     erasure_data_shards: int = 8
@@ -77,6 +86,8 @@ class Manifest:
         return json.dumps({
             "version": self.version,
             "transfer_name": self.transfer_name,
+            "ack_secret": self.ack_secret,
+            "delete_token": self.delete_token,
             "total_bytes": self.total_bytes,
             "segment_size": self.segment_size,
             "erasure_data_shards": self.erasure_data_shards,
@@ -90,6 +101,8 @@ class Manifest:
         manifest = cls(
             version=d["version"],
             transfer_name=d["transfer_name"],
+            ack_secret=d.get("ack_secret", ""),
+            delete_token=d.get("delete_token", ""),
             total_bytes=d["total_bytes"],
             segment_size=d["segment_size"],
             erasure_data_shards=d["erasure_data_shards"],
@@ -115,8 +128,10 @@ class Manifest:
         """Check a received manifest is internally consistent before acting on
         it. It comes from the sender, so sizes and indexes are untrusted and
         would otherwise drive allocations, file offsets and list indexing."""
-        if self.version != 1:
+        if self.version != MANIFEST_VERSION:
             raise ValueError(f"unsupported manifest version {self.version}")
+        if not (_HEX_HASH.match(self.ack_secret or "") and _HEX_HASH.match(self.delete_token or "")):
+            raise ValueError("manifest has an invalid ack secret or delete token")
         k, m = self.erasure_data_shards, self.erasure_parity_shards
         if not (isinstance(k, int) and isinstance(m, int) and k >= 1 and m >= 0 and k + m <= 256):
             raise ValueError(f"invalid erasure coding {k}+{m}")

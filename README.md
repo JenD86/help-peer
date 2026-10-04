@@ -11,7 +11,8 @@ Think "Wormhole meets BitTorrent, but the sender can leave."
 3. The encrypted manifest is uploaded to a relay server
 4. **Sender can go offline**
 5. **Receiver** runs `helppeer receive orbit-velvet-zoom-candle-harbor-ember` — the code derives the encryption keys, fetches the manifest from the relay, downloads shards from storage nodes (checking each against its BLAKE3 hash), reconstructs, decrypts, and verifies each file against the sender's BLAKE3 hash
-6. Shards and manifests auto-expire after 24 hours (TTL)
+6. Once everything is verified, the receiver confirms with the relay, which deletes the manifest. If the download fails partway, just run the same command again
+7. Shards and manifests auto-expire after 24 hours (TTL)
 
 The Rust CLI, Python SDK and web UI implement the same protocol, so a code from any one of them can be received with any other.
 
@@ -148,6 +149,8 @@ STORAGE_PORT=7002 STORAGE_DIR=/tmp/node2 ./storage-node/storage-node &
 
 Shards are assigned round-robin, so the number of nodes decides how many node failures a transfer survives: with 3+ nodes each holds at most 4 of a segment's 12 shards, so any one node can be lost; with 12+ nodes any four can. Clients warn when fewer than 3 nodes are configured.
 
+If a node fails while sending, its shards are stored on the remaining nodes instead (with a warning, since the transfer then tolerates fewer node failures).
+
 ## Architecture
 
 ```
@@ -162,7 +165,7 @@ Shards are assigned round-robin, so the number of nodes decides how many node fa
                 └─────────────┘
 ```
 
-- **Relay Server** (Go): Stores encrypted manifests indexed by `BLAKE3(K_index)`. One-time retrieval. Never sees plaintext.
+- **Relay Server** (Go): Stores encrypted manifests indexed by `BLAKE3(K_index)` until receivers confirm or they expire. Never sees plaintext.
 - **Storage Node** (Go): Stores encrypted shards with TTL. Zero-knowledge — cannot decrypt shard contents.
 - **Client** (Rust): Handles key derivation from the transfer code, AES-256-GCM encryption, Reed-Solomon erasure coding (8+4), manifest building, upload/download, and file validation.
 - **Python SDK**: Pure Python implementation of the full protocol (with numpy for fast erasure coding). `pip install helppeer` — zero external binaries required. Includes CLI, programmatic API, and agent-friendly structured output.
@@ -174,14 +177,16 @@ Shards are assigned round-robin, so the number of nodes decides how many node fa
 
 - **End-to-end encryption**: All data is encrypted with AES-256-GCM before leaving the sender's machine
 - **High-entropy transfer codes**: 6 words from the EFF long wordlist (~77 bits), drawn from the OS CSPRNG. Because sender and receiver are never online together there is no PAKE — the code is the key — so it must be long enough to resist offline guessing and relay enumeration
+- **Argon2id key stretching**: Keys are derived from the code with Argon2id (64 MiB, 3 passes) before HKDF, so each guess costs real memory and time on top of the code's entropy
 - **Safe extraction**: receivers reject manifest paths that are absolute or contain `..`, so a sender cannot write outside the chosen output directory
 - **Zero-knowledge storage**: Storage nodes and relays never see plaintext or encryption keys
 - **Integrity checks**: Storage nodes refuse shards whose content doesn't match their BLAKE3 name; receivers discard shards that fail their hash and rebuild from parity, then check every file against the sender's BLAKE3 hash
 - **Erasure coding**: 8 data + 4 parity shards — any 8 of 12 rebuild a segment (see [Multiple Storage Nodes](#multiple-storage-nodes) for what that means per node)
 - **Manifest validation**: Receivers check the manifest's sizes, indexes and paths before allocating or writing anything
 - **Safetensors validation**: The header of each `.safetensors` file is validated when its first segment arrives
-- **One-time manifest retrieval**: Relay deletes manifest after first download (configurable for multi-recipient via `X-Max-Retrievals` header). A download that fails partway can't be retried with the same code
-- **Rate limiting**: The relay and web backend throttle clients that make repeated failed manifest lookups (code guessing); the web backend also limits login and notification emails
+- **Confirmed retrieval**: The relay deletes a manifest once the receiver confirms a verified download, using a secret from inside the encrypted manifest (or once each recipient has, for multi-recipient transfers via `X-Max-Retrievals`). Until then, failed downloads can be retried with the same code
+- **Delete tokens**: Shards can only be deleted early with a token from the encrypted manifest; otherwise they expire by TTL
+- **Rate limiting**: The relay and web backend throttle clients that make repeated failed manifest lookups (code guessing) and limit manifest uploads per client; the relay also caps its total storage. The web backend limits login and notification emails
 - **TTL expiry**: Shards and manifests auto-expire after 24 hours, including across restarts
 - **Web trust model**: The web backend serves the page that does the encryption, so web users trust the server operator not to tamper with it. The server never stores transfer codes
 
@@ -196,7 +201,11 @@ Shards are assigned round-robin, so the number of nodes decides how many node fa
 | `RELAY_MAX_RETRIEVALS` | `1` | Default max retrievals per manifest (override via `X-Max-Retrievals` header, max 1000) |
 | `RELAY_TTL` | `86400` (24h) | Manifest TTL in seconds |
 | `RELAY_MAX_MANIFEST_BYTES` | `33554432` (32MB) | Largest manifest accepted |
-| `RELAY_MISS_LIMIT` | `30` | Failed lookups allowed per client IP per minute before returning 429 |
+| `RELAY_MISS_LIMIT` | `30` | Failed lookups/confirmations allowed per client IP per minute before returning 429 |
+| `RELAY_PUT_LIMIT` | `120` | Manifest uploads allowed per client IP per minute (`0` = unlimited) |
+| `RELAY_MAX_TOTAL_BYTES` | `1073741824` (1GB) | Total manifest storage; uploads get 507 when full |
+
+A web backend reaches the relay from a single address for all its users, so it applies its own per-user limits; raise `RELAY_PUT_LIMIT` if a busy web backend hits the relay's limit.
 
 ### Storage Node
 
@@ -358,8 +367,9 @@ diff -r /tmp/test-model /tmp/received-py
 - [ ] DHT-based node discovery (Kademlia)
 - [ ] NAT traversal (UDP hole-punching)
 - [ ] QUIC transport
-- [ ] Resumable downloads (SQLite state tracking) — today a failed download consumes the one-time manifest
-- [ ] Slow KDF (Argon2id) on the transfer code for extra brute-force margin
+- [ ] Resumable downloads (SQLite state tracking) — failed downloads can be retried, but start over from the beginning
+- [x] Argon2id key stretching of transfer codes
+- [x] Retry-safe retrieval (manifest deleted on confirmation, not on fetch)
 - [ ] Multiple relay federation
 - [ ] Node reputation system
 - [ ] Additional validators (ONNX, GGUF, Pickle)

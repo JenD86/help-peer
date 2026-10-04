@@ -16,3 +16,11 @@ serde_json = "1.0"
 sha2 = "0.10"
 tokio = { version = "1.0", features = ["full"] }
 hkdf = "0.12"
+argon2 = "0.5"
+
+# Argon2id runs on every send and receive; keep it fast in debug builds too.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

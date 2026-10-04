@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -154,6 +155,12 @@ func (s *StorageNode) putShard(w http.ResponseWriter, req *http.Request, hash st
 		}
 	}
 
+	deleteTokenHash := req.Header.Get("X-Delete-Token-Hash")
+	if deleteTokenHash != "" && !hashRe.MatchString(deleteTokenHash) {
+		http.Error(w, "invalid X-Delete-Token-Hash", http.StatusBadRequest)
+		return
+	}
+
 	// Check if shard already exists (dedup). The hash is the content's BLAKE3,
 	// so an identical upload just extends the TTL.
 	if _, err := s.store.Exists(hash); err == nil {
@@ -195,7 +202,7 @@ func (s *StorageNode) putShard(w http.ResponseWriter, req *http.Request, hash st
 		return
 	}
 
-	written, err := s.store.Put(hash, bytes.NewReader(data), ttl)
+	written, err := s.store.Put(hash, bytes.NewReader(data), ttl, deleteTokenHash)
 	if err != nil {
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
@@ -236,8 +243,35 @@ func (s *StorageNode) getShard(w http.ResponseWriter, req *http.Request, hash st
 	}
 }
 
+// deleteShard removes a shard early. It requires the delete token the
+// uploader registered (X-Delete-Token-Hash on PUT), so only someone holding
+// the transfer's manifest can delete its shards.
 func (s *StorageNode) deleteShard(w http.ResponseWriter, req *http.Request, hash string) {
-	s.store.Delete(hash)
+	if _, err := s.store.Exists(hash); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	token, err := hex.DecodeString(req.Header.Get("X-Delete-Token"))
+	if err != nil || len(token) != 32 {
+		http.Error(w, "X-Delete-Token required", http.StatusForbidden)
+		return
+	}
+	stored, err := s.store.DeleteTokenHash(hash)
+	if err != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	sum := blake3.Sum256(token)
+	if stored == "" || subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(stored)) != 1 {
+		http.Error(w, "wrong delete token", http.StatusForbidden)
+		return
+	}
+
+	if err := s.store.Delete(hash); err != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

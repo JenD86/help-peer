@@ -71,3 +71,5 @@ helppeer --json receive orbit-velvet-zoom-candle-harbor-ember   # machine-readab
 `python -m helppeer` works the same way.
 
 Transfers are fully compatible with the Rust CLI and the web UI: a code from any of them can be received with any other. Every shard and every received file is checked against its BLAKE3 hash.
+
+If a download fails partway (e.g. a storage node is briefly unreachable), run `receive` again with the same code: the relay keeps the transfer until a receiver confirms it was fully received. `receive()` returns `"acknowledged": True` once that confirmation succeeds.

@@ -3,10 +3,20 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::crypto;
 
+/// Manifest format version. Version 2 introduced Argon2id key derivation,
+/// `ack_secret` and `delete_token`.
+pub const MANIFEST_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u32,
     pub transfer_name: String,
+    /// Hex secret the receiver presents to the relay to confirm a completed
+    /// download (the relay only stores its BLAKE3).
+    pub ack_secret: String,
+    /// Hex token that authorizes deleting this transfer's shards from
+    /// storage nodes (they only store its BLAKE3).
+    pub delete_token: String,
     pub total_bytes: u64,
     pub segment_size: u32,
     pub erasure_data_shards: u8,
@@ -70,8 +80,10 @@ impl Manifest {
         files.sort_by(|a, b| a.path.cmp(&b.path));
 
         let manifest = Manifest {
-            version: 1,
+            version: MANIFEST_VERSION,
             transfer_name: transfer_name.to_string(),
+            ack_secret: String::new(),  // filled during upload
+            delete_token: String::new(), // filled during upload
             total_bytes: files.iter().map(|f| f.size).sum(),
             segment_size: crypto::SEGMENT_SIZE as u32,
             erasure_data_shards: crypto::DATA_SHARDS as u8,
@@ -95,8 +107,11 @@ impl Manifest {
     /// it. It comes from the sender, so sizes and indexes are untrusted and
     /// would otherwise drive allocations, file offsets and array indexing.
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if self.version != MANIFEST_VERSION {
             return Err(format!("unsupported manifest version {}", self.version));
+        }
+        if !is_hex_hash(&self.ack_secret) || !is_hex_hash(&self.delete_token) {
+            return Err("manifest has an invalid ack secret or delete token".into());
         }
         if self.erasure_data_shards as usize != crypto::DATA_SHARDS
             || self.erasure_parity_shards as usize != crypto::PARITY_SHARDS
@@ -288,7 +303,7 @@ mod tests {
         let (manifest, base) = Manifest::build(&tmp, "test-transfer").unwrap();
         assert_eq!(base, tmp);
         assert_eq!(manifest.transfer_name, "test-transfer");
-        assert_eq!(manifest.version, 1);
+        assert_eq!(manifest.version, MANIFEST_VERSION);
         let paths: Vec<_> = manifest.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["config.json", "sub/model.safetensors"]);
         assert_eq!(manifest.total_bytes, 9);
@@ -317,8 +332,10 @@ mod tests {
 
     fn valid_manifest() -> Manifest {
         Manifest {
-            version: 1,
+            version: MANIFEST_VERSION,
             transfer_name: "t".into(),
+            ack_secret: "cd".repeat(32),
+            delete_token: "ef".repeat(32),
             total_bytes: 100,
             segment_size: 64,
             erasure_data_shards: 8,
@@ -353,6 +370,9 @@ mod tests {
             ("shard index", Box::new(move |m| m.files[0].segments[0].shards = vec![shard(12)])),
             ("dup shard", Box::new(move |m| m.files[0].segments[0].shards = vec![shard(1), shard(1)])),
             ("file hash", Box::new(|m| m.files[0].blake3 = Some("zz".into()))),
+            ("version", Box::new(|m| m.version = 1)),
+            ("ack secret", Box::new(|m| m.ack_secret = String::new())),
+            ("delete token", Box::new(|m| m.delete_token = "x".into())),
         ];
         for (name, mutate) in cases {
             let mut m = valid_manifest();
@@ -392,8 +412,10 @@ mod tests {
     #[test]
     fn test_manifest_json_roundtrip() {
         let manifest = Manifest {
-            version: 1,
+            version: MANIFEST_VERSION,
             transfer_name: "test".into(),
+            ack_secret: "cd".repeat(32),
+            delete_token: "ef".repeat(32),
             total_bytes: 100,
             segment_size: 67108864,
             erasure_data_shards: 8,

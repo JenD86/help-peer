@@ -6,9 +6,20 @@
       "Orbit Velvet Zoom Candle Harbor Ember",
       " orbit--velvet-zoom candle-harbor-ember "
     ],
-    "k_data": "2f46aef8373e93279f20015f09fa494f8394e29ca837dcea9abbb254d0351a23",
-    "k_index": "94a18cbef403a9e022ee4b79450b483b97461ae2b8b27202f7c676819d654fcf",
-    "relay_hash": "31cd38fbc16d0fe250dbca75580985f41d4b0c3e6c9f9653dc62089c65980863"
+    "argon2id": {
+      "salt": "help-peer/v2",
+      "memory_kib": 65536,
+      "iterations": 3,
+      "parallelism": 1,
+      "length": 32
+    },
+    "k_data": "143496db4d727d03b0fa2fdadf1d228e2aa756a4ccb67921974a1d56a799c61a",
+    "k_index": "c644bba135cb990f4ca95074a76e5dfefaaa7cb3804ba4f39cd44af129e1153a",
+    "relay_hash": "09149c5bc2139adba000e702eb2b1ac6e3bc5fa4f70f273a81fb64a93191d20c"
+  },
+  "secret_hash": {
+    "secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "blake3": "e528e95798037df410543d9f31e396ecdd458d71b157d6014398bae32fb56c65"
   },
   "erasure": {
     "data_shards": 8,

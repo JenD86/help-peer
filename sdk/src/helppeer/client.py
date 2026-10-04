@@ -5,6 +5,7 @@ import functools
 import os
 import secrets
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -56,6 +57,9 @@ def send(
     manifest, base_dir = build_manifest(path, name, config.segment_size)
     manifest.erasure_data_shards = config.data_shards
     manifest.erasure_parity_shards = config.parity_shards
+    manifest.ack_secret = crypto.new_secret()
+    manifest.delete_token = crypto.new_secret()
+    uploader = _ShardUploader(config.storage_nodes, crypto.secret_hash(manifest.delete_token))
 
     with _session() as session, ThreadPoolExecutor(max_workers=total_shards) as pool:
         for f in manifest.files:
@@ -75,10 +79,7 @@ def send(
 
                 # Upload the shards in parallel (round-robin node assignment)
                 futures = [
-                    pool.submit(
-                        _upload_shard, session, idx,
-                        config.storage_nodes[idx % len(config.storage_nodes)], shard,
-                    )
+                    pool.submit(uploader.upload, session, idx, shard)
                     for idx, shard in enumerate(shards)
                 ]
                 seg.shards = [fut.result() for fut in futures]
@@ -86,9 +87,20 @@ def send(
 
             f.blake3 = hasher.hexdigest()
 
+        if uploader.dead:
+            failed = ", ".join(config.storage_nodes[i] for i in sorted(uploader.dead))
+            print(
+                f"warning: storage node(s) {failed} failed; their shards were stored on the "
+                "remaining nodes, so this transfer tolerates fewer node failures",
+                file=sys.stderr,
+            )
+
         # Encrypt and upload manifest
         encrypted_manifest = crypto.encrypt_segment(k_data, manifest.to_json())
-        _upload_manifest(session, config.relay_url, r_hash, encrypted_manifest)
+        _upload_manifest(
+            session, config.relay_url, r_hash, encrypted_manifest,
+            crypto.secret_hash(manifest.ack_secret),
+        )
 
     if return_details:
         return {
@@ -121,7 +133,8 @@ def receive(
     r_hash = crypto.relay_hash(k_index)
 
     with _session() as session:
-        # Download encrypted manifest from relay
+        # Download encrypted manifest from relay. It stays there until we
+        # confirm success below, so a failed download can be retried.
         encrypted_manifest = _download_manifest(session, config.relay_url, r_hash)
         manifest = Manifest.from_json(crypto.decrypt_segment(k_data, encrypted_manifest))
         manifest.validate()
@@ -176,11 +189,15 @@ def receive(
                     )
                 file_hashes[f.path] = file_hash
 
+        # Everything verified: confirm, which uses up this recipient's retrieval.
+        acknowledged = _acknowledge(session, config.relay_url, r_hash, manifest.ack_secret)
+
     return {
         "transfer_name": manifest.transfer_name,
         "files": len(manifest.files),
         "total_bytes": manifest.total_bytes,
         "file_hashes": file_hashes,
+        "acknowledged": acknowledged,
     }
 
 
@@ -192,6 +209,8 @@ def _session() -> requests.Session:
         total=3,
         backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
+        # Not POST: a download confirmation isn't idempotent. urllib3 still
+        # retries connection failures, where the request never arrived.
         allowed_methods=frozenset({"GET", "PUT"}),
         raise_on_status=False,
     )
@@ -212,26 +231,68 @@ def _warn_if_too_few_nodes(nodes: int, total_shards: int, parity_shards: int) ->
         )
 
 
-def _upload_shard(session: requests.Session, index: int, node_url: str, data: bytes) -> ManifestShard:
-    """Upload a shard to a storage node."""
-    h = crypto.content_hash(data)
-    resp = session.put(
-        f"{node_url}/shard/{h}", data=data,
-        headers={"Content-Type": "application/octet-stream"}, timeout=TIMEOUT,
-    )
-    if resp.status_code not in (200, 201):
-        raise RuntimeError(f"shard upload to {node_url} returned {resp.status_code}")
-    return ManifestShard(index=index, hash=h, node=node_url)
+class _ShardUploader:
+    """Uploads shards round-robin, moving a failed node's shards to the next
+    healthy node for the rest of the transfer."""
+
+    def __init__(self, nodes: List[str], delete_token_hash: str):
+        self.nodes = nodes
+        self.delete_token_hash = delete_token_hash
+        self.dead: set = set()
+        self._lock = threading.Lock()
+
+    def upload(self, session: requests.Session, index: int, data: bytes) -> ManifestShard:
+        h = crypto.content_hash(data)
+        last_err: Exception = RuntimeError("all storage nodes have failed")
+        for offset in range(len(self.nodes)):
+            i = (index + offset) % len(self.nodes)
+            with self._lock:
+                if i in self.dead:
+                    continue
+            node = self.nodes[i]
+            try:
+                resp = session.put(
+                    f"{node}/shard/{h}", data=data, timeout=TIMEOUT,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "X-Delete-Token-Hash": self.delete_token_hash,
+                    },
+                )
+                if resp.status_code in (200, 201):
+                    return ManifestShard(index=index, hash=h, node=node)
+                last_err = RuntimeError(f"shard upload to {node} returned {resp.status_code}")
+            except requests.RequestException as e:
+                last_err = RuntimeError(f"shard upload to {node} failed: {e}")
+            with self._lock:
+                self.dead.add(i)
+        raise last_err
 
 
-def _upload_manifest(session: requests.Session, relay_url: str, r_hash: str, data: bytes) -> None:
+def _upload_manifest(
+    session: requests.Session, relay_url: str, r_hash: str, data: bytes, ack_hash: str,
+) -> None:
     """Upload encrypted manifest to relay."""
     resp = session.put(
-        f"{relay_url}/manifest/{r_hash}", data=data,
-        headers={"Content-Type": "application/octet-stream"}, timeout=TIMEOUT,
+        f"{relay_url}/manifest/{r_hash}", data=data, timeout=TIMEOUT,
+        headers={"Content-Type": "application/octet-stream", "X-Ack-Hash": ack_hash},
     )
     if resp.status_code not in (200, 201):
         raise RuntimeError(f"manifest upload returned {resp.status_code}")
+
+
+def _acknowledge(session: requests.Session, relay_url: str, r_hash: str, ack_secret: str) -> bool:
+    """Confirm a completed download with the relay. Failure isn't fatal: the
+    manifest then just stays until it expires."""
+    try:
+        resp = session.post(f"{relay_url}/manifest/{r_hash}/ack", data=ack_secret, timeout=TIMEOUT)
+        if resp.status_code == 204:
+            return True
+        err = f"status {resp.status_code}"
+    except requests.RequestException as e:
+        err = str(e)
+    print(f"warning: could not confirm the download with the relay ({err}); "
+          "it will expire on its own", file=sys.stderr)
+    return False
 
 
 def _download_manifest(session: requests.Session, relay_url: str, r_hash: str) -> bytes:
