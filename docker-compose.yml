@@ -37,12 +37,8 @@ services:
       - RELAY_URL=http://relay:7000
       - STORAGE_NODES=http://storage-node:7001
       - WEB_DATA_DIR=/data
-      # SMTP (Gmail example — use an app password, not your regular password)
-      # - SMTP_HOST=smtp.gmail.com
-      # - SMTP_PORT=465
-      # - SMTP_USER=you@gmail.com
-      # - SMTP_PASS=your-app-password
-      # - SMTP_FROM=you@gmail.com
+    env_file:
+      - .env
     volumes:
       - web-data:/data
     depends_on:
