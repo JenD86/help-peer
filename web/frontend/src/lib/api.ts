@@ -38,7 +38,7 @@ export async function verifyMagicLink(token: string): Promise<{ status: string; 
   return (await postJSON('/api/auth/verify', { token })).json()
 }
 
-export async function checkAuth(): Promise<{ authenticated: boolean; email?: string }> {
+export async function checkAuth(): Promise<{ authenticated: boolean; email?: string; username?: string }> {
   return (await request('/api/auth/me')).json()
 }
 
@@ -129,12 +129,88 @@ export async function cancelTransfer(
   return resp.json()
 }
 
+// Recipients can be email addresses (sent the code by email) or usernames
+// ("alice" or "@alice": the transfer goes to their inbox, plus an email alert).
 export async function notifyRecipients(
   transferId: string,
+  manifestHash: string,
   code: string,
   recipients: string[]
-): Promise<{ status: string; sent: number; errors?: string[] }> {
-  return (await postJSON('/api/notify', { transfer_id: transferId, code, recipients })).json()
+): Promise<{ status: string; sent: number; inboxed: number; errors?: string[] }> {
+  return (await postJSON('/api/notify', { transfer_id: transferId, manifest_hash: manifestHash, code, recipients })).json()
+}
+
+// --- Profile & directory ---
+
+export interface Profile {
+  email: string
+  username: string
+  listed: boolean
+}
+
+export async function getProfile(): Promise<Profile> {
+  return (await request('/api/profile')).json()
+}
+
+export async function setProfile(username: string, listed: boolean): Promise<Profile> {
+  return (await postJSON('/api/profile', { username, listed })).json()
+}
+
+export async function searchUsers(q: string): Promise<string[]> {
+  return (await (await request(`/api/users/search?q=${encodeURIComponent(q)}`)).json()).users ?? []
+}
+
+export async function lookupUser(username: string): Promise<boolean> {
+  return (await (await request(`/api/users/lookup?username=${encodeURIComponent(username)}`)).json()).exists
+}
+
+// --- Inbox ---
+
+export interface InboxItem {
+  id: string
+  sender_username?: string
+  sender_email: string
+  transfer_name: string
+  files: number
+  total_bytes: number
+  code: string
+  manifest_hash: string
+  created_at: string
+  expires_at: string
+}
+
+export async function getInbox(): Promise<InboxItem[]> {
+  return (await (await request('/api/inbox')).json()).items ?? []
+}
+
+export async function dismissInboxItem(id: string): Promise<void> {
+  await request(`/api/inbox/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+// Clear inbox items for a transfer the user just received.
+export async function markReceived(manifestHash: string): Promise<void> {
+  await postJSON('/api/inbox/received', { manifest_hash: manifestHash })
+}
+
+// --- API tokens (for the CLI / Python SDK) ---
+
+export interface APIToken {
+  id: string
+  name: string
+  created_at: string
+  last_used?: string
+}
+
+export async function listTokens(): Promise<APIToken[]> {
+  return (await (await request('/api/tokens')).json()).tokens ?? []
+}
+
+export async function createToken(name: string): Promise<{ token: string; id: string; name: string }> {
+  return (await postJSON('/api/tokens', { name })).json()
+}
+
+export async function revokeToken(id: string): Promise<void> {
+  await request(`/api/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export async function getHistory(): Promise<{ transfers: any[] }> {

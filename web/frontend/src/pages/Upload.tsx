@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { deriveKeys, relayHash, encryptSegment, generateCode, fileHasher, newSecret, secretHash } from '../lib/crypto'
 import {
-  uploadSegment, uploadManifest, notifyRecipients, checkAuth, cancelTransfer,
+  uploadSegment, uploadManifest, notifyRecipients, checkAuth, cancelTransfer, searchUsers, lookupUser,
   type ShardInfo, type CancelInfo,
 } from '../lib/api'
 
@@ -14,6 +14,10 @@ interface ManifestSegment {
   encrypted_size: number
   shards: ShardInfo[]
 }
+
+// A recipient is an email address if it has an '@' after the first
+// character; otherwise it's a username ("alice" or "@alice").
+const isEmail = (r: string) => r.indexOf('@') > 0
 
 // Make a browser file name safe and unique as a manifest path. Receivers
 // reject '\', ':' and NUL in paths, and duplicate paths would overwrite each other.
@@ -32,6 +36,30 @@ export default function Upload() {
   const [files, setFiles] = useState<File[]>([])
   const [transferName, setTransferName] = useState('')
   const [recipients, setRecipients] = useState('')
+  const [userQuery, setUserQuery] = useState('')
+  const [userResults, setUserResults] = useState<string[]>([])
+
+  // Directory search (listed users only; needs 3+ characters and a login)
+  useEffect(() => {
+    const q = userQuery.trim().replace(/^@/, '')
+    if (q.length < 3) {
+      setUserResults([])
+      return
+    }
+    const timer = setTimeout(() => {
+      searchUsers(q).then(setUserResults).catch(() => setUserResults([]))
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [userQuery])
+
+  const addRecipient = (username: string) => {
+    setRecipients(prev => {
+      const list = prev.split(/[,;\s]+/).filter(Boolean)
+      return list.includes(`@${username}`) ? prev : [...list, `@${username}`].join(', ')
+    })
+    setUserQuery('')
+    setUserResults([])
+  }
   const [status, setStatus] = useState<'idle' | 'encrypting' | 'uploading' | 'notifying' | 'done' | 'error'>('idle')
   const [progress, setProgress] = useState('')
   const [result, setResult] = useState<{ code: string; transferName: string; files: number; totalBytes: number } | null>(null)
@@ -79,11 +107,20 @@ export default function Upload() {
 
     try {
       const recipientList = recipients
-        .split(/[,;\n]/)
+        .split(/[,;\s]+/)
         .map(r => r.trim())
         .filter(r => r.length > 0)
-      if (recipientList.length > 0 && !(await checkAuth()).authenticated) {
-        throw new Error('Log in to email the code to recipients, or leave the recipients field empty.')
+      if (recipientList.length > 0) {
+        if (!(await checkAuth()).authenticated) {
+          throw new Error('Log in to send to recipients, or leave the recipients field empty.')
+        }
+        // Catch unknown usernames before uploading anything.
+        const usernames = recipientList.filter(r => !isEmail(r))
+        const exists = await Promise.all(usernames.map(u => lookupUser(u)))
+        const unknown = usernames.filter((_, i) => !exists[i])
+        if (unknown.length > 0) {
+          throw new Error(`Unknown username(s): ${unknown.join(', ')}`)
+        }
       }
 
       const name = transferName || files[0].name
@@ -170,7 +207,7 @@ export default function Upload() {
       if (recipientList.length > 0 && transfer_id) {
         setStatus('notifying')
         setProgress(`Sending notifications to ${recipientList.length} recipient(s)...`)
-        await notifyRecipients(transfer_id, code, recipientList)
+        await notifyRecipients(transfer_id, rHash, code, recipientList)
       }
 
       setStatus('done')
@@ -292,15 +329,39 @@ export default function Upload() {
 
       {/* Recipients */}
       <textarea
-        placeholder="Recipient emails (comma-separated, optional)"
+        placeholder="Recipients (optional): @usernames and/or emails, comma-separated"
         value={recipients}
         onChange={(e) => setRecipients(e.target.value)}
         rows={2}
-        className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-1 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+        className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-2 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
       />
+      <div className="relative mb-1">
+        <input
+          type="text"
+          value={userQuery}
+          onChange={(e) => setUserQuery(e.target.value)}
+          placeholder="Find a person by username..."
+          className="w-full px-4 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+        />
+        {userResults.length > 0 && (
+          <div className="absolute z-10 w-full bg-white border border-gray-200 rounded-lg mt-1 shadow">
+            {userResults.map(u => (
+              <button
+                key={u}
+                type="button"
+                onClick={() => addRecipient(u)}
+                className="block w-full text-left px-4 py-2 text-sm hover:bg-indigo-50"
+              >
+                @{u}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
       <p className="text-xs text-gray-500 mb-4">
-        Requires login. The code is emailed through this server, so the server and the recipients' mail
-        providers can see it. For the strongest privacy, leave this empty and share the code yourself.
+        Requires login. Usernames get the transfer in their Help Peer inbox plus an email alert; email addresses get
+        the code by email. Either way the code passes through this server (and, for email, the recipients' mail
+        providers). For the strongest privacy, leave this empty and share the code yourself.
       </p>
 
       {/* Upload button */}

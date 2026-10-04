@@ -71,6 +71,22 @@ helppeer --json receive orbit-velvet-zoom-candle-harbor-ember   # machine-readab
 
 `python -m helppeer` works the same way.
 
+## Usernames and inbox
+
+On a Help Peer website, create an API token on the Account page, then:
+
+```python
+import helppeer
+
+helppeer.login("https://helppeer.example.com", "hp_...")      # saved for the SDK and CLI
+helppeer.send("./my-model", to=["alice", "bob@example.com"])  # usernames go to their inbox
+for item in helppeer.inbox():                                 # transfers sent to you
+    helppeer.receive(item["code"], output_dir="./received")   # also clears the inbox item
+helppeer.logout()
+```
+
+The CLI equivalents are `helppeer login --server ... --token ...`, `helppeer send PATH --to alice,bob@example.com`, `helppeer inbox` and `helppeer logout`. While logged in, the SDK uses the website's relay and storage nodes unless you `configure()` others.
+
 Transfers are fully compatible with the Rust CLI and the web UI: a code from any of them can be received with any other. Every shard and every received file is checked against its BLAKE3 hash.
 
 If a download fails partway (e.g. a storage node is briefly unreachable), run `receive` again with the same code: the relay keeps the transfer until a receiver confirms it was fully received. `receive()` returns `"acknowledged": True` once that confirmation succeeds. Retries resume where the previous attempt stopped: progress is kept in `<output_dir>/.helppeer/` (and removed on success), segments already on disk are re-checked against their hashes, and `"resumed_segments"` in the result says how many were reused. The Rust CLI uses the same format, so either can finish a download the other started.

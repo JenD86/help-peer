@@ -18,7 +18,8 @@ const (
 	magicLinkTTL = 15 * time.Minute
 )
 
-// DB is a file-based store for users, sessions, magic links, and transfers.
+// DB is a file-based store for users, sessions, magic links, transfers,
+// inbox items and API tokens.
 type DB struct {
 	mu        sync.Mutex
 	dataDir   string
@@ -26,11 +27,19 @@ type DB struct {
 	sessions  map[string]*Session // session token -> session
 	links     map[string]*MagicLink
 	transfers map[string]*TransferRecord // record ID -> record
+	inbox     map[string]*InboxItem      // item ID -> item
+	tokens    map[string]*APIToken       // SHA-256 of token -> token
+	usernames map[string]string          // username -> email (derived from users)
 }
 
 type User struct {
 	Email     string    `json:"email"`
 	CreatedAt time.Time `json:"created_at"`
+	// Username lets others send to this user without knowing their email.
+	Username string `json:"username,omitempty"`
+	// Listed users appear in directory search; unlisted ones can still be
+	// sent to by exact username.
+	Listed bool `json:"listed,omitempty"`
 }
 
 type Session struct {
@@ -64,6 +73,9 @@ func NewDB(dataDir string) (*DB, error) {
 		sessions:  make(map[string]*Session),
 		links:     make(map[string]*MagicLink),
 		transfers: make(map[string]*TransferRecord),
+		inbox:     make(map[string]*InboxItem),
+		tokens:    make(map[string]*APIToken),
+		usernames: make(map[string]string),
 	}
 	db.load()
 	return db, nil
@@ -88,6 +100,14 @@ func (d *DB) load() {
 	loadJSON("sessions.json", &d.sessions)
 	loadJSON("links.json", &d.links)
 	loadJSON("transfers.json", &d.transfers)
+	loadJSON("inbox.json", &d.inbox)
+	loadJSON("tokens.json", &d.tokens)
+
+	for email, u := range d.users {
+		if u != nil && u.Username != "" {
+			d.usernames[u.Username] = email
+		}
+	}
 
 	// Older versions keyed transfer records by their transfer code, which
 	// let anyone with the data directory decrypt those transfers. Re-key
@@ -114,6 +134,8 @@ func (d *DB) save() {
 		"sessions.json":  d.sessions,
 		"links.json":     d.links,
 		"transfers.json": d.transfers,
+		"inbox.json":     d.inbox,
+		"tokens.json":    d.tokens,
 	} {
 		data, err := json.Marshal(v)
 		if err != nil {
@@ -152,6 +174,13 @@ func (d *DB) removeExpiredLocked() {
 	for token, l := range d.links {
 		if l == nil || now.After(l.Expires) {
 			delete(d.links, token)
+		}
+	}
+	// Inbox items hold transfer codes, so drop them as soon as the transfer
+	// itself would have expired.
+	for id, item := range d.inbox {
+		if item == nil || now.After(item.ExpiresAt) {
+			delete(d.inbox, id)
 		}
 	}
 }

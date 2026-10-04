@@ -331,3 +331,50 @@ class TestResumeLog:
         log.record("f", 1, "h1")
         log.close()
         assert ResumeLog(str(tmp_path), "m").previously_done == 2
+
+
+class TestAccount:
+    def test_is_email(self):
+        from helppeer.account import is_email
+        assert is_email("a@b.com")
+        assert not is_email("@alice")
+        assert not is_email("alice")
+
+    def test_login_saves_private_config_and_logout_removes_it(self, tmp_path, monkeypatch):
+        from helppeer import account
+        monkeypatch.setenv("HELPEER_CONFIG", str(tmp_path / "cfg" / "config.json"))
+        monkeypatch.setattr(account.Api, "whoami", lambda self: {"email": "a@b.com", "username": "a"})
+
+        result = account.login("https://hp.example.com/", "hp_secret")
+        assert result["server"] == "https://hp.example.com"
+        assert account.load_login() == {"server": "https://hp.example.com", "token": "hp_secret"}
+        assert os.stat(result["config"]).st_mode & 0o777 == 0o600
+
+        assert account.logout() is True
+        assert account.load_login() is None
+        assert account.logout() is False
+
+
+class TestServerResolution:
+    def _set(self, monkeypatch, relay, nodes, server_cfg):
+        from helppeer import config, account
+        monkeypatch.setattr(config, "_default_config", config.Config(relay_url=relay, storage_nodes=nodes))
+        api = None
+        if server_cfg is not None:
+            api = type("FakeApi", (), {"server_config": lambda self: server_cfg})()
+        monkeypatch.setattr(account, "current_api", lambda: api)
+
+    def test_explicit_settings_win(self, monkeypatch):
+        from helppeer.config import resolve_servers
+        self._set(monkeypatch, "http://r:1", ["http://n:1"], {"relay_url": "http://site-relay", "storage_nodes": ["x"]})
+        assert resolve_servers() == ("http://r:1", ["http://n:1"])
+
+    def test_logged_in_site_fills_gaps(self, monkeypatch):
+        from helppeer.config import resolve_servers
+        self._set(monkeypatch, None, None, {"relay_url": "https://relay.site/", "storage_nodes": ["https://n1", "https://n2"]})
+        assert resolve_servers() == ("https://relay.site", ["https://n1", "https://n2"])
+
+    def test_defaults_when_not_logged_in(self, monkeypatch):
+        from helppeer.config import resolve_servers, DEFAULT_RELAY, DEFAULT_NODES
+        self._set(monkeypatch, None, None, None)
+        assert resolve_servers() == (DEFAULT_RELAY, DEFAULT_NODES)

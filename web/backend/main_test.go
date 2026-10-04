@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -100,6 +101,10 @@ func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	switch req.Method {
+	case http.MethodHead:
+		if _, ok := r.manifests[hash]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+		}
 	case http.MethodPut:
 		if _, ok := r.manifests[hash]; ok {
 			w.WriteHeader(http.StatusConflict)
@@ -406,16 +411,16 @@ func TestManifestUploadHistoryAndNotify(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	if c := notify(alice, map[string]interface{}{"transfer_id": id, "code": "Buy cheap pills!", "recipients": []string{"x@example.com"}}); c != 400 {
+	if c := notify(alice, map[string]interface{}{"transfer_id": id, "manifest_hash": hash, "code": "Buy cheap pills!", "recipients": []string{"x@example.com"}}); c != 400 {
 		t.Errorf("arbitrary code text accepted: %d", c)
 	}
-	if c := notify(bob, map[string]interface{}{"transfer_id": id, "code": code, "recipients": []string{"x@example.com"}}); c != 404 {
+	if c := notify(bob, map[string]interface{}{"transfer_id": id, "manifest_hash": hash, "code": code, "recipients": []string{"x@example.com"}}); c != 404 {
 		t.Errorf("notify for someone else's transfer: %d", c)
 	}
-	if c := notify(alice, map[string]interface{}{"transfer_id": id, "code": code, "recipients": make([]string, 21)}); c != 400 {
+	if c := notify(alice, map[string]interface{}{"transfer_id": id, "manifest_hash": hash, "code": code, "recipients": make([]string, 21)}); c != 400 {
 		t.Errorf("too many recipients accepted: %d", c)
 	}
-	if c := notify(alice, map[string]interface{}{"transfer_id": id, "code": code, "recipients": []string{"x@example.com"}}); c != 200 {
+	if c := notify(alice, map[string]interface{}{"transfer_id": id, "manifest_hash": hash, "code": code, "recipients": []string{"x@example.com"}}); c != 200 {
 		t.Errorf("valid notify: %d", c)
 	}
 
@@ -659,5 +664,280 @@ func TestCancel(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Fatalf("second cancel: %d", resp.StatusCode)
+	}
+}
+
+// --- Directory, inbox and API tokens ----------------------------------------
+
+func (e *testEnv) do(t *testing.T, method, path string, body interface{}, session, bearer string) (int, map[string]interface{}) {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		data, _ := json.Marshal(body)
+		r = bytes.NewReader(data)
+	}
+	req, _ := http.NewRequest(method, e.srv.URL+path, r)
+	if session != "" {
+		req.AddCookie(&http.Cookie{Name: "helppeer_session", Value: session})
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out := map[string]interface{}{}
+	json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+func TestProfileAndSearch(t *testing.T) {
+	e := newTestEnv(t)
+	alice := e.s.db.CreateSession("alice@example.com")
+	bob := e.s.db.CreateSession("bob@example.com")
+	carol := e.s.db.CreateSession("carol@example.com")
+
+	if code, _ := e.do(t, "GET", "/api/profile", nil, "", ""); code != 401 {
+		t.Fatalf("anonymous profile: %d", code)
+	}
+	if code, _ := e.do(t, "POST", "/api/profile", map[string]interface{}{"username": "@Alice_W", "listed": true}, alice, ""); code != 200 {
+		t.Fatalf("set username: %d", code)
+	}
+	if code, _ := e.do(t, "POST", "/api/profile", map[string]interface{}{"username": "alice_w"}, bob, ""); code != 409 {
+		t.Fatalf("taken username: %d", code)
+	}
+	for _, bad := range []string{"ab", "admin", "has space", "-dash", strings.Repeat("x", 31)} {
+		if code, _ := e.do(t, "POST", "/api/profile", map[string]interface{}{"username": bad}, bob, ""); code != 400 {
+			t.Errorf("username %q accepted: %d", bad, code)
+		}
+	}
+	e.do(t, "POST", "/api/profile", map[string]interface{}{"username": "alicorn", "listed": false}, bob, "")
+	e.do(t, "POST", "/api/profile", map[string]interface{}{"username": "alien", "listed": true}, carol, "")
+
+	// Only listed users are found, and emails never appear.
+	code, out := e.do(t, "GET", "/api/users/search?q=ali", nil, bob, "")
+	users := fmt.Sprint(out["users"])
+	if code != 200 || users != "[alice_w alien]" {
+		t.Fatalf("search: %d %v", code, out)
+	}
+	if code, _ := e.do(t, "GET", "/api/users/search?q=al", nil, bob, ""); code != 400 {
+		t.Fatalf("short query: %d", code)
+	}
+	if code, _ := e.do(t, "GET", "/api/users/search?q=ali", nil, "", ""); code != 401 {
+		t.Fatalf("anonymous search: %d", code)
+	}
+	// Unlisted users can still be found by exact name.
+	if _, out := e.do(t, "GET", "/api/users/lookup?username=@alicorn", nil, alice, ""); out["exists"] != true {
+		t.Fatalf("lookup unlisted: %v", out)
+	}
+	if _, out := e.do(t, "GET", "/api/users/lookup?username=nobody", nil, alice, ""); out["exists"] != false {
+		t.Fatalf("lookup missing: %v", out)
+	}
+	// Changing a username frees the old one.
+	e.do(t, "POST", "/api/profile", map[string]interface{}{"username": "alice2", "listed": true}, alice, "")
+	if _, out := e.do(t, "GET", "/api/users/lookup?username=alice_w", nil, bob, ""); out["exists"] != false {
+		t.Fatal("old username still resolves")
+	}
+}
+
+// sendToUsers uploads a fake transfer as `sender` and notifies recipients.
+func sendToUsers(t *testing.T, e *testEnv, sender, hash string, recipients []string) (int, map[string]interface{}) {
+	t.Helper()
+	e.relay.manifests[hash] = []byte("enc")
+	// The history record comes from a (separate) manifest upload; give each
+	// one a fresh hash so repeated sends don't collide on the fake relay.
+	uploadHash := make([]byte, 32)
+	rand.Read(uploadHash)
+	_, up := e.do(t, "POST", "/api/upload/manifest", map[string]interface{}{
+		"manifest_hash": hex.EncodeToString(uploadHash), "manifest_data": []byte("x"), "ack_hash": strings.Repeat("ac", 32),
+		"transfer_name": "weights", "files": 2, "total_bytes": 2048,
+	}, sender, "")
+	return e.do(t, "POST", "/api/notify", map[string]interface{}{
+		"transfer_id": up["transfer_id"], "manifest_hash": hash,
+		"code": "orbit-velvet-zoom-candle-harbor-ember", "recipients": recipients,
+	}, sender, "")
+}
+
+func TestSendToUsernameUsesInbox(t *testing.T) {
+	e := newTestEnv(t)
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	alice := e.s.db.CreateSession("alice@example.com")
+	bob := e.s.db.CreateSession("bob@example.com")
+	e.s.db.SetProfile("alice@example.com", "alice", true)
+	e.s.db.SetProfile("bob@example.com", "bob", false)
+	hash := strings.Repeat("ab", 32)
+
+	if code, out := sendToUsers(t, e, alice, hash, []string{"@bob", "nobody"}); code != 400 || !strings.Contains(fmt.Sprint(out["error"]), "nobody") {
+		t.Fatalf("unknown recipient: %d %v", code, out)
+	}
+	code, out := sendToUsers(t, e, alice, hash, []string{"@bob", "carol@example.com"})
+	if code != 200 || out["inboxed"] != float64(1) || out["sent"] != float64(1) {
+		t.Fatalf("notify: %d %v", code, out)
+	}
+	// The alert to Bob doesn't include the code; the email to Carol does.
+	var bobAlert, carolEmail string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "Inbox alert to bob@example.com") {
+			bobAlert = line
+		}
+		if strings.Contains(line, "Email to carol@example.com") {
+			carolEmail = line
+		}
+	}
+	if bobAlert == "" || strings.Contains(bobAlert, "orbit-velvet") {
+		t.Fatalf("bob's alert missing or contains the code: %q", bobAlert)
+	}
+	if !strings.Contains(carolEmail, "orbit-velvet-zoom-candle-harbor-ember") {
+		t.Fatalf("carol's email: %q", carolEmail)
+	}
+
+	// Bob sees it, with the code; Alice doesn't.
+	_, inbox := e.do(t, "GET", "/api/inbox", nil, bob, "")
+	items := inbox["items"].([]interface{})
+	if len(items) != 1 {
+		t.Fatalf("bob's inbox: %v", inbox)
+	}
+	item := items[0].(map[string]interface{})
+	if item["code"] != "orbit-velvet-zoom-candle-harbor-ember" || item["sender_username"] != "alice" {
+		t.Fatalf("item: %v", item)
+	}
+	if _, inbox := e.do(t, "GET", "/api/inbox", nil, alice, ""); len(inbox["items"].([]interface{})) != 0 {
+		t.Fatal("alice can see bob's inbox")
+	}
+
+	// Alice can't dismiss Bob's item; Bob can.
+	id := item["id"].(string)
+	if code, _ := e.do(t, "DELETE", "/api/inbox/"+id, nil, alice, ""); code != 404 {
+		t.Fatalf("alice dismissed bob's item: %d", code)
+	}
+	if code, _ := e.do(t, "DELETE", "/api/inbox/"+id, nil, bob, ""); code != 200 {
+		t.Fatalf("dismiss: %d", code)
+	}
+}
+
+func TestInboxDropsGoneTransfers(t *testing.T) {
+	e := newTestEnv(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	alice := e.s.db.CreateSession("alice@example.com")
+	bob := e.s.db.CreateSession("bob@example.com")
+	e.s.db.SetProfile("bob@example.com", "bob", false)
+
+	received := strings.Repeat("a1", 32)
+	cancelled := strings.Repeat("b2", 32)
+	marked := strings.Repeat("c3", 32)
+	for _, h := range []string{received, cancelled, marked} {
+		sendToUsers(t, e, alice, h, []string{"bob"})
+	}
+
+	// Received or cancelled elsewhere (e.g. from the CLI): gone from the relay.
+	delete(e.relay.manifests, received)
+	delete(e.relay.manifests, cancelled)
+	// Received from the CLI by a logged-in recipient, which reports it.
+	if code, out := e.do(t, "POST", "/api/inbox/received", map[string]string{"manifest_hash": marked}, bob, ""); code != 200 || out["removed"] != float64(1) {
+		t.Fatalf("received: %d %v", code, out)
+	}
+	if _, inbox := e.do(t, "GET", "/api/inbox", nil, bob, ""); len(inbox["items"].([]interface{})) != 0 {
+		t.Fatalf("stale items shown: %v", inbox)
+	}
+	if n := len(e.s.db.inbox); n != 0 {
+		t.Fatalf("%d stale items kept (with codes)", n)
+	}
+}
+
+func TestInboxItemsExpire(t *testing.T) {
+	e := newTestEnv(t)
+	e.s.db.AddInboxItem(&InboxItem{ID: "x", RecipientEmail: "bob@example.com", Code: "c", ExpiresAt: time.Now().Add(-time.Second)})
+	bob := e.s.db.CreateSession("bob@example.com") // triggers cleanup
+	if _, inbox := e.do(t, "GET", "/api/inbox", nil, bob, ""); len(inbox["items"].([]interface{})) != 0 {
+		t.Fatal("expired item shown")
+	}
+	if _, ok := e.s.db.inbox["x"]; ok {
+		t.Fatal("expired item (and its code) kept")
+	}
+}
+
+func TestAPITokens(t *testing.T) {
+	e := newTestEnv(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	alice := e.s.db.CreateSession("alice@example.com")
+
+	code, out := e.do(t, "POST", "/api/tokens", map[string]string{"name": "laptop"}, alice, "")
+	token, _ := out["token"].(string)
+	if code != 200 || !strings.HasPrefix(token, "hp_") {
+		t.Fatalf("create token: %d %v", code, out)
+	}
+	// The token works for API calls...
+	if _, me := e.do(t, "GET", "/api/auth/me", nil, "", token); me["email"] != "alice@example.com" {
+		t.Fatalf("auth/me with token: %v", me)
+	}
+	// ...but can't manage tokens, and isn't stored in the clear.
+	if code, _ := e.do(t, "POST", "/api/tokens", nil, "", token); code != 401 {
+		t.Fatalf("token minted a token: %d", code)
+	}
+	raw, _ := os.ReadFile(filepath.Join(e.s.db.dataDir, "tokens.json"))
+	if strings.Contains(string(raw), token) {
+		t.Fatal("token stored in plaintext")
+	}
+
+	// A CLI can register its transfer (only if it's really on the relay) and notify.
+	hash := strings.Repeat("dd", 32)
+	if code, _ := e.do(t, "POST", "/api/transfers", map[string]interface{}{"manifest_hash": hash, "transfer_name": "cli"}, "", token); code != 404 {
+		t.Fatalf("register missing transfer: %d", code)
+	}
+	e.relay.manifests[hash] = []byte("enc")
+	code, reg := e.do(t, "POST", "/api/transfers", map[string]interface{}{"manifest_hash": hash, "transfer_name": "cli", "files": 1}, "", token)
+	if code != 200 || reg["transfer_id"] == "" {
+		t.Fatalf("register: %d %v", code, reg)
+	}
+	e.s.db.SetProfile("bob@example.com", "bob", false)
+	if code, out := e.do(t, "POST", "/api/notify", map[string]interface{}{
+		"transfer_id": reg["transfer_id"], "manifest_hash": hash,
+		"code": "orbit-velvet-zoom-candle-harbor-ember", "recipients": []string{"bob"},
+	}, "", token); code != 200 || out["inboxed"] != float64(1) {
+		t.Fatalf("notify via token: %d %v", code, out)
+	}
+
+	// Revoked tokens stop working.
+	_, list := e.do(t, "GET", "/api/tokens", nil, alice, "")
+	id := list["tokens"].([]interface{})[0].(map[string]interface{})["id"].(string)
+	e.do(t, "DELETE", "/api/tokens/"+id, nil, alice, "")
+	if _, me := e.do(t, "GET", "/api/auth/me", nil, "", token); me["authenticated"] != false {
+		t.Fatal("revoked token still works")
+	}
+}
+
+func TestConfigEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	e.s.relayPublicURL = "https://relay.example.com"
+	_, cfg := e.do(t, "GET", "/api/config", nil, "", "")
+	if cfg["relay_url"] != "https://relay.example.com" || fmt.Sprint(cfg["storage_nodes"]) != "["+publicNode+"]" {
+		t.Fatalf("config: %v", cfg)
+	}
+}
+
+func TestCancelClearsInbox(t *testing.T) {
+	e := newTestEnv(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	alice := e.s.db.CreateSession("alice@example.com")
+	e.s.db.SetProfile("bob@example.com", "bob", false)
+	hash := strings.Repeat("ee", 32)
+	ackSecret := bytes.Repeat([]byte{4}, 32)
+	ackSum := blake3.Sum256(ackSecret)
+	sendToUsers(t, e, alice, hash, []string{"bob"})
+	e.relay.ackHashes[hash] = hex.EncodeToString(ackSum[:])
+
+	code, _ := e.do(t, "POST", "/api/cancel", map[string]interface{}{
+		"manifest_hash": hash, "ack_secret": hex.EncodeToString(ackSecret), "delete_token": strings.Repeat("11", 32),
+	}, "", "")
+	if code != 200 || len(e.s.db.inbox) != 0 {
+		t.Fatalf("cancel: %d, %d inbox items left", code, len(e.s.db.inbox))
 	}
 }

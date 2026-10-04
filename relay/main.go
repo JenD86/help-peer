@@ -36,6 +36,7 @@ type Relay struct {
 	usedBytes        int64 // total size of stored manifests; guarded by mu
 	defaultRetrieval int
 	misses           *rateLimiter // failed lookups / acks per client
+	trustedToken     string       // lets a web backend bypass per-IP limits
 	puts             *rateLimiter // uploads per client
 }
 
@@ -73,6 +74,7 @@ func main() {
 		defaultRetrieval: envInt("RELAY_MAX_RETRIEVALS", 1),
 		misses:           newRateLimiter("misses", envInt("RELAY_MISS_LIMIT", 30), time.Minute),
 		puts:             newRateLimiter("puts", envInt("RELAY_PUT_LIMIT", 120), time.Minute),
+		trustedToken:     os.Getenv("RELAY_TRUSTED_TOKEN"),
 	}
 	relay.usedBytes = relay.measureUsage()
 
@@ -110,6 +112,8 @@ func (r *Relay) manifestHandler(w http.ResponseWriter, req *http.Request) {
 	switch {
 	case action == "" && req.Method == http.MethodPut:
 		r.putManifest(w, req, hash)
+	case action == "" && req.Method == http.MethodHead:
+		r.headManifest(w, req, hash)
 	case action == "" && req.Method == http.MethodGet:
 		r.getManifest(w, req, hash)
 	case action == "" && req.Method == http.MethodDelete:
@@ -128,7 +132,7 @@ func (r *Relay) manifestPath(hash string) string {
 }
 
 func (r *Relay) putManifest(w http.ResponseWriter, req *http.Request, hash string) {
-	if !r.puts.Allow(clientIP(req)) {
+	if !r.puts.Allow(r.limitKey(req)) {
 		http.Error(w, "too many uploads", http.StatusTooManyRequests)
 		return
 	}
@@ -209,7 +213,7 @@ func (r *Relay) putManifest(w http.ResponseWriter, req *http.Request, hash strin
 
 func (r *Relay) getManifest(w http.ResponseWriter, req *http.Request, hash string) {
 	// Codes are the only secret, so throttle clients that keep guessing.
-	ip := clientIP(req)
+	ip := r.limitKey(req)
 	if r.misses.Exceeded(ip) {
 		http.Error(w, "too many failed lookups", http.StatusTooManyRequests)
 		return
@@ -238,6 +242,39 @@ func (r *Relay) getManifest(w http.ResponseWriter, req *http.Request, hash strin
 	log.Printf("Retrieved manifest %s (%d bytes)", hash[:12], len(data))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(data)
+}
+
+// headManifest reports whether a manifest is available, without returning
+// or consuming it.
+func (r *Relay) headManifest(w http.ResponseWriter, req *http.Request, hash string) {
+	key := r.limitKey(req)
+	if r.misses.Exceeded(key) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	manifestPath := r.manifestPath(hash)
+	if _, err := os.Stat(manifestPath); err != nil || r.expireIfDue(manifestPath) {
+		r.misses.Hit(key)
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// limitKey identifies the client for rate limiting. A web backend sees all
+// its users as one address, so it applies per-user limits itself and sends
+// the shared RELAY_TRUSTED_TOKEN; its requests get "", which the limiters
+// treat as unlimited.
+func (r *Relay) limitKey(req *http.Request) string {
+	if r.trustedToken != "" &&
+		subtle.ConstantTimeCompare([]byte(req.Header.Get("X-Relay-Token")), []byte(r.trustedToken)) == 1 {
+		return ""
+	}
+	return clientIP(req)
 }
 
 // ackManifest records a completed download. The body is the hex ack secret
@@ -278,7 +315,7 @@ func (r *Relay) cancelManifest(w http.ResponseWriter, req *http.Request, hash st
 // manifest's ack hash, writing an error response if it doesn't match.
 // Requires r.mu.
 func (r *Relay) authorize(w http.ResponseWriter, req *http.Request, hash string) (string, manifestMeta, bool) {
-	ip := clientIP(req)
+	ip := r.limitKey(req)
 	if r.misses.Exceeded(ip) {
 		http.Error(w, "too many failed requests", http.StatusTooManyRequests)
 		return "", manifestMeta{}, false

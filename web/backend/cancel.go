@@ -76,6 +76,9 @@ func (s *Server) cancelHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Codes for this transfer are now useless; drop them from inboxes.
+	s.db.DeleteInboxItems(func(i *InboxItem) bool { return i.ManifestHash == body.ManifestHash })
+
 	// Then delete the shards, on our own storage nodes only (the list comes
 	// from the browser).
 	var mu sync.Mutex

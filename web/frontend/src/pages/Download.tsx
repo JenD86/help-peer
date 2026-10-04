@@ -1,6 +1,7 @@
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { deriveKeys, relayHash, decryptSegment, fileHasher } from '../lib/crypto'
-import { downloadManifest, downloadSegment, ackDownload, type ShardInfo } from '../lib/api'
+import { downloadManifest, downloadSegment, ackDownload, markReceived, type ShardInfo } from '../lib/api'
 
 interface ManifestFile {
   path: string
@@ -61,7 +62,9 @@ function checkManifest(m: Manifest) {
 }
 
 export default function Download() {
-  const [code, setCode] = useState('')
+  const [searchParams] = useSearchParams()
+  // Prefilled when coming from the inbox
+  const [code, setCode] = useState(searchParams.get('code') ?? '')
   const [status, setStatus] = useState<'idle' | 'fetching' | 'downloading' | 'done' | 'error'>('idle')
   const [progress, setProgress] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
@@ -165,6 +168,9 @@ export default function Download() {
       } catch {
         acked = false
       }
+
+      // Clear this transfer from the user's inbox, if it was there.
+      markReceived(rHash).catch(() => {})
 
       setAckFailed(!acked)
       setDownloadedFiles(downloaded)

@@ -138,29 +138,6 @@ func (a *Auth) authLogoutHandler(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (a *Auth) authMeHandler(w http.ResponseWriter, req *http.Request) {
-	cookie, err := req.Cookie("helppeer_session")
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"authenticated": false,
-		})
-		return
-	}
-
-	email, ok := a.db.GetSession(cookie.Value)
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"authenticated": false,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"authenticated": true,
-		"email":        email,
-	})
-}
-
 // isValidEmail accepts a bare address (no display name), which also rules
 // out CR/LF and anything else that could inject email headers.
 func isValidEmail(email string) bool {

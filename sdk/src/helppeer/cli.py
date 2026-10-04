@@ -3,7 +3,7 @@ import argparse
 import json
 import sys
 
-from . import send, receive, cancel, configure
+from . import send, receive, cancel, configure, login, logout, inbox
 
 
 def main():
@@ -21,6 +21,8 @@ def main():
     send_cmd = sub.add_parser("send", help="Send a file or directory")
     send_cmd.add_argument("path", help="Path to send")
     send_cmd.add_argument("--name", default="untitled-transfer", help="Transfer name")
+    send_cmd.add_argument("--to", help="Recipients, comma-separated: usernames (alice or @alice) get it in "
+                                       "their inbox, emails get the code by email. Needs `login`.")
 
     recv_cmd = sub.add_parser("receive", help="Receive a transfer")
     recv_cmd.add_argument("code", help="Transfer code (e.g., orbit-velvet-zoom-candle-harbor-ember)")
@@ -28,6 +30,15 @@ def main():
 
     cancel_cmd = sub.add_parser("cancel", help="Cancel a transfer before it expires")
     cancel_cmd.add_argument("code", help="Transfer code")
+
+    sub.add_parser("inbox", help="List transfers sent to your username (needs `login`)")
+
+    login_cmd = sub.add_parser("login", help="Log in to a Help Peer website with an API token "
+                                             "(create one on its Account page)")
+    login_cmd.add_argument("--server", required=True, help="Website URL, e.g. https://helppeer.example.com")
+    login_cmd.add_argument("--token", required=True, help="API token (hp_...)")
+
+    sub.add_parser("logout", help="Forget the saved login")
 
     args = parser.parse_args()
 
@@ -38,12 +49,10 @@ def main():
     configure(relay=args.relay, storage_nodes=nodes)
 
     try:
-        if args.command == "send":
-            _send(args)
-        elif args.command == "cancel":
-            _cancel(args)
-        else:
-            _receive(args)
+        {
+            "send": _send, "receive": _receive, "cancel": _cancel,
+            "inbox": _inbox, "login": _login, "logout": _logout,
+        }[args.command](args)
     except Exception as e:  # report any failure cleanly instead of a traceback
         if args.json:
             print(json.dumps({"status": "error", "error": str(e)}, indent=2))
@@ -58,7 +67,8 @@ def _send(args):
         print(f"Transfer name: {args.name}")
         print()
 
-    result = send(args.path, name=args.name, return_details=True)
+    to = [r.strip() for r in args.to.split(",") if r.strip()] if args.to else None
+    result = send(args.path, name=args.name, to=to, return_details=True)
 
     if args.json:
         print(json.dumps({"status": "ok", "path": args.path, **result}, indent=2))
@@ -67,7 +77,11 @@ def _send(args):
     print()
     print(f"  Transfer code: {result['code']}")
     print()
-    print("  Share this code with the recipient.")
+    if result["recipients"]:
+        print(f"  Sent to: {', '.join(result['recipients'])}")
+        print("  (usernames get it in their inbox; email addresses get the code by email)")
+    else:
+        print("  Share this code with the recipient.")
     print("  The data will be available for 24 hours.")
 
 
@@ -104,6 +118,38 @@ def _cancel(args):
     if result["shards_failed"]:
         print(f"  {result['shards_failed']} shards could not be deleted (node unreachable); "
               "they expire within 24 hours")
+
+
+def _inbox(args):
+    items = inbox()
+    if args.json:
+        print(json.dumps({"status": "ok", "items": items}, indent=2))
+        return
+    if not items:
+        print("Nothing waiting for you.")
+    for item in items:
+        sender = f"@{item['sender_username']}" if item.get("sender_username") else item.get("sender_email", "?")
+        print(f"{item.get('transfer_name') or 'untitled'} — from {sender} "
+              f"({item['files']} file(s), {item['total_bytes']} bytes, expires {item['expires_at']})")
+        print(f"  helppeer receive {item['code']}")
+
+
+def _login(args):
+    result = login(args.server, args.token)
+    if args.json:
+        print(json.dumps({"status": "ok", **result}, indent=2))
+        return
+    who = f"{result['email']} (@{result['username']})" if result["username"] else result["email"]
+    print(f"✓ Logged in to {result['server']} as {who}")
+    print(f"  Saved to {result['config']}")
+
+
+def _logout(args):
+    removed = logout()
+    if args.json:
+        print(json.dumps({"status": "ok", "was_logged_in": removed}, indent=2))
+        return
+    print("✓ Logged out" if removed else "Not logged in")
 
 
 if __name__ == "__main__":

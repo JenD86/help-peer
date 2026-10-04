@@ -142,6 +142,33 @@ python -m helppeer --help                                       # also works
 **Web UI:**
 Open `http://localhost:8080` in your browser. Drag & drop files to send, or enter a code to receive. Files are encrypted in the browser and uploaded 64MB at a time; the backend only ever sees ciphertext, which it erasure-codes and stores. In Chromium-based browsers, received files stream straight into a folder you pick; other browsers assemble each file in memory, so use the CLI for very large transfers there. A failed browser download can be retried with the same code but starts over, whereas the CLI and Python SDK resume. After sending, the "Cancel transfer" button withdraws the transfer and deletes its stored data (or use `helppeer cancel <code>` later). Log in with email for transfer history and to email the code to recipients (the code then passes through the server and the recipients' mail providers).
 
+### Usernames, Directory and Inbox
+
+Logged-in web users can claim a **username** on the Account page so others can send to them without knowing their email:
+
+- **Directory:** users can choose to be listed. Logged-in users can search listed usernames (3+ characters, prefix match); unlisted users can still be sent to by exact username. Email addresses are never shown.
+- **Sending to a username:** put `@alice` (or `alice`) in the recipients field — mixed freely with email addresses. The transfer appears in Alice's **Inbox** on the site, and she gets an email saying something is waiting (without the code). Email-address recipients get the code by email as before.
+- **Inbox:** shows who sent what, with a Receive button. Items disappear once received (from the web or a logged-in CLI), when the sender cancels, when dismissed, or after 24 hours.
+- **Privacy note:** to deliver a code to an inbox, the server stores it until the transfer is received or expires, so the server can decrypt transfers sent to usernames (as it can for codes it emails). For the strongest privacy, share the code yourself.
+
+The CLI and Python SDK can do the same after logging in with an **API token** (create one on the Account page; it's shown once and stored only as a hash):
+
+```bash
+helppeer login --server https://helppeer.example.com --token hp_...
+helppeer send ./my-model --to alice,bob@example.com   # usernames and/or emails
+helppeer inbox                                        # transfers sent to you
+helppeer receive <code>                               # also clears it from your inbox
+helppeer logout
+```
+
+```python
+helppeer.login("https://helppeer.example.com", "hp_...")
+helppeer.send("./my-model", to=["alice", "bob@example.com"])
+helppeer.inbox()
+```
+
+Once logged in, the CLI and SDK use the website's relay and storage nodes unless `--relay`/`--nodes` (or `HELPEER_RELAY_URL`/`HELPEER_STORAGE_NODES`) say otherwise. The login is saved to `~/.config/helppeer/config.json` (or `$HELPEER_CONFIG`), readable only by you, and is shared by the CLI and SDK.
+
 ### Multiple Storage Nodes
 
 ```bash
@@ -209,9 +236,10 @@ If a node fails while sending, its shards are stored on the remaining nodes inst
 | `RELAY_MAX_MANIFEST_BYTES` | `33554432` (32MB) | Largest manifest accepted |
 | `RELAY_MISS_LIMIT` | `30` | Failed lookups/confirmations allowed per client IP per minute before returning 429 |
 | `RELAY_PUT_LIMIT` | `120` | Manifest uploads allowed per client IP per minute (`0` = unlimited) |
+| `RELAY_TRUSTED_TOKEN` | — | Shared secret; requests carrying it in `X-Relay-Token` (i.e. from your web backend) skip the per-IP limits |
 | `RELAY_MAX_TOTAL_BYTES` | `1073741824` (1GB) | Total manifest storage; uploads get 507 when full |
 
-A web backend reaches the relay from a single address for all its users, so it applies its own per-user limits; raise `RELAY_PUT_LIMIT` if a busy web backend hits the relay's limit.
+A web backend reaches the relay from a single address for all its users, so it applies its own per-user limits. Set the same `RELAY_TRUSTED_TOKEN` on the relay and the web backend so the relay doesn't limit all web users together (see `.env.example`).
 
 ### Storage Node
 
@@ -238,6 +266,8 @@ A web backend reaches the relay from a single address for all its users, so it a
 | `--nodes` | `http://127.0.0.1:7001` | Comma-separated storage node URLs |
 | `--json` | off | Machine-readable JSON output for agents/scripts |
 
+`--relay` and `--nodes` default to `$HELPEER_RELAY_URL` / `$HELPEER_STORAGE_NODES`, then the logged-in website's settings, then the local defaults above.
+
 ### Python SDK
 
 | Env Var | Default | Description |
@@ -254,6 +284,8 @@ The Python CLI takes the same `--relay`, `--nodes` and `--json` flags as the Rus
 | `WEB_PORT` | `8080` | Listen port |
 | `RELAY_URL` | `http://127.0.0.1:7000` | Relay server URL |
 | `STORAGE_NODES` | `http://127.0.0.1:7001` | Comma-separated storage node URLs, as the backend reaches them |
+| `RELAY_URL_PUBLIC` | `RELAY_URL` | The relay as CLI/SDK users reach it; given to logged-in clients via `/api/config` |
+| `RELAY_TRUSTED_TOKEN` | — | Must match the relay's, to skip its per-IP limits (this server limits per user itself) |
 | `STORAGE_NODES_PUBLIC` | `STORAGE_NODES` | The same nodes (same order) as other clients reach them; written into manifests so CLI users can receive web transfers |
 | `WEB_TRUST_PROXY` | off | Set to `1` behind a reverse proxy so rate limits use `X-Forwarded-For`. Leave off otherwise, or clients can spoof their address |
 | `WEB_BASE_URL` | `http://localhost:{WEB_PORT}` | Public URL used in login emails. **Required when SMTP is configured** |
@@ -292,6 +324,7 @@ help-peer/
 │   └── src/
 │       ├── main.rs                            # CLI entry point (--json mode)
 │       ├── cancel.rs                          # Cancel a transfer early
+│       ├── account.rs                         # Website login (API token), inbox, send to usernames
 │       ├── crypto.rs                          # AES-GCM, HKDF, BLAKE3
 │       ├── http.rs                            # Shared HTTP client with timeouts + retries
 │       ├── resume.rs                          # Progress log for resuming downloads
@@ -309,6 +342,7 @@ help-peer/
 │   │   ├── erasure.py                         # Reed-Solomon erasure coding
 │   │   ├── manifest.py                        # Manifest builder & parser
 │   │   ├── resume.py                          # Progress log for resuming downloads
+│   │   ├── account.py                         # Website login (API token), inbox, send to usernames
 │   │   ├── validator.py                       # Safetensors & pluggable validators
 │   │   ├── config.py                          # Configuration & env vars
 │   │   └── cli.py                             # CLI entry point
@@ -324,6 +358,7 @@ help-peer/
 │   │   ├── download.go                         # Shard download + reconstruction
 │   │   ├── notify.go                           # SMTP email notifications
 │   │   ├── cancel.go                           # Cancel a transfer sent from the browser
+│   │   ├── directory.go                        # Usernames, directory search, inbox, API tokens
 │   │   ├── ratelimit.go                        # Per-client rate limiting
 │   │   └── *_test.go
 │   └── frontend/                               # React frontend (Vite + Tailwind)
@@ -331,7 +366,7 @@ help-peer/
 │       ├── vite.config.ts
 │       └── src/
 │           ├── App.tsx                         # Router + layout
-│           ├── pages/                          # Landing, Login, Verify, Upload, Download, History
+│           ├── pages/                          # Landing, Login, Verify, Upload, Download, History, Inbox, Account
 │           └── lib/                            # crypto.ts (WebCrypto + BLAKE3), api.ts (API client)
 └── README.md
 ```

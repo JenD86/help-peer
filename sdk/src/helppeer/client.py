@@ -15,7 +15,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .config import get_config
+from .account import current_api, is_email
+from .config import get_config, resolve_servers
 from . import crypto
 from . import erasure
 from .manifest import (
@@ -33,6 +34,7 @@ def send(
     path: str,
     name: str = "untitled-transfer",
     *,
+    to: Optional[List[str]] = None,
     return_details: bool = False,
 ) -> Union[str, Dict[str, Any]]:
     """Send a file or directory. Returns the transfer code.
@@ -40,16 +42,30 @@ def send(
     Args:
         path: Path to the file or directory to send.
         name: Human-readable name for the transfer.
+        to: Optional recipients. Usernames ("alice" or "@alice") get the
+            transfer in their inbox on the website; email addresses get the
+            code by email. Requires helppeer.login().
         return_details: If True, return a dict with full transfer details.
 
     Returns:
         Transfer code string (e.g., "orbit-velvet-zoom-candle-harbor-ember"), or a dict if return_details=True.
     """
     config = get_config()
-    if not config.storage_nodes:
+    recipients = [r.strip() for r in (to or []) if r.strip()]
+    api = current_api()
+    # Check recipients before uploading anything.
+    if recipients:
+        if api is None:
+            raise RuntimeError("sending to recipients needs a login: call helppeer.login() first")
+        unknown = [r for r in recipients if not is_email(r) and not api.username_exists(r)]
+        if unknown:
+            raise ValueError(f"unknown username(s): {', '.join(unknown)}")
+
+    relay_url, storage_nodes = resolve_servers()
+    if not storage_nodes:
         raise ValueError("no storage nodes configured")
     total_shards = config.data_shards + config.parity_shards
-    _warn_if_too_few_nodes(len(config.storage_nodes), total_shards, config.parity_shards)
+    _warn_if_too_few_nodes(len(storage_nodes), total_shards, config.parity_shards)
 
     code = _generate_code()
     k_data, k_index = crypto.derive_keys(code)
@@ -60,7 +76,7 @@ def send(
     manifest.erasure_parity_shards = config.parity_shards
     manifest.ack_secret = crypto.new_secret()
     manifest.delete_token = crypto.new_secret()
-    uploader = _ShardUploader(config.storage_nodes, crypto.secret_hash(manifest.delete_token))
+    uploader = _ShardUploader(storage_nodes, crypto.secret_hash(manifest.delete_token))
 
     with _session() as session, ThreadPoolExecutor(max_workers=total_shards) as pool:
         for f in manifest.files:
@@ -89,7 +105,7 @@ def send(
             f.blake3 = hasher.hexdigest()
 
         if uploader.dead:
-            failed = ", ".join(config.storage_nodes[i] for i in sorted(uploader.dead))
+            failed = ", ".join(storage_nodes[i] for i in sorted(uploader.dead))
             print(
                 f"warning: storage node(s) {failed} failed; their shards were stored on the "
                 "remaining nodes, so this transfer tolerates fewer node failures",
@@ -99,9 +115,21 @@ def send(
         # Encrypt and upload manifest
         encrypted_manifest = crypto.encrypt_segment(k_data, manifest.to_json())
         _upload_manifest(
-            session, config.relay_url, r_hash, encrypted_manifest,
+            session, relay_url, r_hash, encrypted_manifest,
             crypto.secret_hash(manifest.ack_secret),
         )
+
+    # Tell the recipients. The upload already succeeded, so problems here are
+    # reported rather than raised.
+    notify_errors: List[str] = []
+    if recipients:
+        try:
+            result = api.notify(r_hash, code, name, len(manifest.files), manifest.total_bytes, recipients)
+            notify_errors = list(result.get("errors") or [])
+        except Exception as e:
+            notify_errors = [f"couldn't notify recipients ({e}); share the code yourself"]
+        for err in notify_errors:
+            print(f"warning: {err}", file=sys.stderr)
 
     if return_details:
         return {
@@ -109,6 +137,8 @@ def send(
             "transfer_name": name,
             "files": len(manifest.files),
             "total_bytes": manifest.total_bytes,
+            "recipients": recipients,
+            "notify_errors": notify_errors,
         }
     return code
 
@@ -129,14 +159,14 @@ def receive(
     Returns:
         Dict with transfer details: transfer_name, files, total_bytes, file_hashes.
     """
-    config = get_config()
+    relay_url, _ = resolve_servers()
     k_data, k_index = crypto.derive_keys(code)
     r_hash = crypto.relay_hash(k_index)
 
     with _session() as session:
         # Download encrypted manifest from relay. It stays there until we
         # confirm success below, so a failed download can be retried.
-        encrypted_manifest = _download_manifest(session, config.relay_url, r_hash)
+        encrypted_manifest = _download_manifest(session, relay_url, r_hash)
         manifest_json = crypto.decrypt_segment(k_data, encrypted_manifest)
         manifest = Manifest.from_json(manifest_json)
         manifest.validate()
@@ -217,7 +247,15 @@ def receive(
         log.remove()
 
         # Everything verified: confirm, which uses up this recipient's retrieval.
-        acknowledged = _acknowledge(session, config.relay_url, r_hash, manifest.ack_secret)
+        acknowledged = _acknowledge(session, relay_url, r_hash, manifest.ack_secret)
+
+    # If it was sent to our username, clear it from the inbox.
+    api = current_api()
+    if api is not None:
+        try:
+            api.mark_received(r_hash)
+        except Exception:
+            pass
 
     return {
         "transfer_name": manifest.transfer_name,
@@ -239,13 +277,13 @@ def cancel(code: str) -> Dict[str, Any]:
     Returns:
         Dict with transfer_name, shards_deleted, shards_already_gone, shards_failed.
     """
-    config = get_config()
+    relay_url, _ = resolve_servers()
     k_data, k_index = crypto.derive_keys(code)
     r_hash = crypto.relay_hash(k_index)
-    manifest_url = f"{config.relay_url}/manifest/{r_hash}"
+    manifest_url = f"{relay_url}/manifest/{r_hash}"
 
     with _session() as session:
-        encrypted_manifest = _download_manifest(session, config.relay_url, r_hash)
+        encrypted_manifest = _download_manifest(session, relay_url, r_hash)
         manifest = Manifest.from_json(crypto.decrypt_segment(k_data, encrypted_manifest))
         manifest.validate()
 

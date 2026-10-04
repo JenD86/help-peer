@@ -18,7 +18,8 @@ func clientIP(req *http.Request) string {
 	return host
 }
 
-// rateLimiter allows `limit` hits per key per fixed window (0 = unlimited).
+// rateLimiter allows `limit` hits per key per fixed window. A limit of 0, or
+// an empty key (a trusted caller), means unlimited.
 type rateLimiter struct {
 	name   string // identifies it in the saved state file
 	mu     sync.Mutex
@@ -47,7 +48,7 @@ func (l *rateLimiter) current(key string) *rateWindow {
 
 // Exceeded reports whether key has used up its allowance for this window.
 func (l *rateLimiter) Exceeded(key string) bool {
-	if l.limit <= 0 {
+	if l.limit <= 0 || key == "" {
 		return false
 	}
 	l.mu.Lock()
@@ -57,7 +58,7 @@ func (l *rateLimiter) Exceeded(key string) bool {
 
 // Allow consumes one unit for key, or reports false if none are left.
 func (l *rateLimiter) Allow(key string) bool {
-	if l.limit <= 0 {
+	if l.limit <= 0 || key == "" {
 		return true
 	}
 	l.mu.Lock()
@@ -71,6 +72,9 @@ func (l *rateLimiter) Allow(key string) bool {
 }
 
 func (l *rateLimiter) Hit(key string) {
+	if key == "" {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.current(key).n++

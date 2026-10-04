@@ -8,6 +8,9 @@ services:
     environment:
       - RELAY_PORT=7000
       - RELAY_DIR=/data
+      # Shared with the web backend so its requests skip per-IP limits (it
+      # limits its own users instead). Empty disables it.
+      - RELAY_TRUSTED_TOKEN=${RELAY_TRUSTED_TOKEN:-}
     volumes:
       - relay-data:/data
 
@@ -35,6 +38,9 @@ services:
     environment:
       - WEB_PORT=8080
       - RELAY_URL=http://relay:7000
+      # How the CLI/SDK reach the relay (sent to logged-in clients via /api/config)
+      - RELAY_URL_PUBLIC=http://127.0.0.1:7000
+      - RELAY_TRUSTED_TOKEN=${RELAY_TRUSTED_TOKEN:-}
       - STORAGE_NODES=http://storage-node:7001
       # How clients outside Docker reach the same node; written into manifests
       # so the CLI can receive transfers sent from the web UI.

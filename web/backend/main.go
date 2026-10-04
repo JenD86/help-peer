@@ -29,17 +29,20 @@ type StorageNode struct {
 }
 
 type Server struct {
-	db           *DB
-	auth         *Auth
-	relayURL     string
-	storageNodes []StorageNode
-	smtpConfig   *SMTPConfig
-	static       fs.FS
-	health       *nodeHealth
+	db       *DB
+	auth     *Auth
+	relayURL string
+	// relayPublicURL is the relay as CLI/SDK users reach it (for /api/config).
+	relayPublicURL string
+	storageNodes   []StorageNode
+	smtpConfig     *SMTPConfig
+	static         fs.FS
+	health         *nodeHealth
 
 	manifestMisses  *rateLimiter // failed manifest lookups per client
 	manifestUploads *rateLimiter // manifest uploads per client
 	notifyLimit     *rateLimiter // notification emails per sender
+	directoryLimit  *rateLimiter // username searches/lookups per user
 }
 
 type SMTPConfig struct {
@@ -111,6 +114,12 @@ func main() {
 	}
 
 	server := NewServer(db, relayURL, storageNodes, smtpConfig, baseURL, staticSub)
+	if public := strings.TrimRight(os.Getenv("RELAY_URL_PUBLIC"), "/"); public != "" {
+		server.relayPublicURL = public
+	}
+	if token := os.Getenv("RELAY_TRUSTED_TOKEN"); token != "" {
+		httpClient.Transport = &relayAuthTransport{base: http.DefaultTransport, relayURL: strings.TrimRight(relayURL, "/"), token: token}
+	}
 
 	// Keep rate limits across restarts, saving on shutdown as well.
 	limits := newLimiterStore(filepath.Join(dataDir, "ratelimits.json"), server.limiters()...)
@@ -127,6 +136,7 @@ func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, b
 		db:              db,
 		auth:            NewAuth(db, smtp, baseURL),
 		relayURL:        relayURL,
+		relayPublicURL:  relayURL,
 		storageNodes:    nodes,
 		smtpConfig:      smtp,
 		static:          static,
@@ -134,13 +144,29 @@ func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, b
 		manifestMisses:  newRateLimiter("manifest-misses", 30, time.Minute),
 		manifestUploads: newRateLimiter("manifest-uploads", 30, time.Minute),
 		notifyLimit:     newRateLimiter("notify", 50, time.Hour),
+		directoryLimit:  newRateLimiter("directory", 60, time.Minute),
 	}
+}
+
+// authMeHandler reports who is logged in (by session or API token).
+func (s *Server) authMeHandler(w http.ResponseWriter, req *http.Request) {
+	email, ok := s.getUserEmail(req)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"authenticated": false})
+		return
+	}
+	u, _ := s.db.GetUser(email)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"authenticated": true,
+		"email":         email,
+		"username":      u.Username,
+	})
 }
 
 // limiters lists every rate limiter, for saving their state.
 func (s *Server) limiters() []*rateLimiter {
 	return []*rateLimiter{
-		s.manifestMisses, s.manifestUploads, s.notifyLimit,
+		s.manifestMisses, s.manifestUploads, s.notifyLimit, s.directoryLimit,
 		s.auth.requestsPerIP, s.auth.requestsPerEmail,
 	}
 }
@@ -166,13 +192,23 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/auth/request", s.auth.authRequestHandler)
 	mux.HandleFunc("/api/auth/verify", s.auth.authVerifyHandler)
 	mux.HandleFunc("/api/auth/logout", s.auth.authLogoutHandler)
-	mux.HandleFunc("/api/auth/me", s.auth.authMeHandler)
+	mux.HandleFunc("/api/auth/me", s.authMeHandler)
 	mux.HandleFunc("/api/upload/segment", s.segmentUploadHandler)
 	mux.HandleFunc("/api/upload/manifest", s.manifestUploadHandler)
 	mux.HandleFunc("/api/download", s.downloadHandler)
 	mux.HandleFunc("/api/download/segment", s.segmentDownloadHandler)
 	mux.HandleFunc("/api/download/ack", s.ackHandler)
 	mux.HandleFunc("/api/cancel", s.cancelHandler)
+	mux.HandleFunc("/api/profile", s.profileHandler)
+	mux.HandleFunc("/api/users/search", s.userSearchHandler)
+	mux.HandleFunc("/api/users/lookup", s.userLookupHandler)
+	mux.HandleFunc("/api/inbox", s.inboxHandler)
+	mux.HandleFunc("/api/inbox/", s.inboxHandler)
+	mux.HandleFunc("/api/inbox/received", s.inboxReceivedHandler)
+	mux.HandleFunc("/api/tokens", s.tokensHandler)
+	mux.HandleFunc("/api/tokens/", s.tokensHandler)
+	mux.HandleFunc("/api/transfers", s.registerTransferHandler)
+	mux.HandleFunc("/api/config", s.configHandler)
 	mux.HandleFunc("/api/notify", s.notifyHandler)
 	mux.HandleFunc("/api/history", s.historyHandler)
 	mux.HandleFunc("/api/health", s.healthHandler)
@@ -270,7 +306,17 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// getUserEmail identifies the user from an API token (CLI/SDK, sent as
+// "Authorization: Bearer hp_...") or a browser session cookie.
 func (s *Server) getUserEmail(req *http.Request) (string, bool) {
+	if auth := req.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		return s.db.EmailForAPIToken(strings.TrimPrefix(auth, "Bearer "))
+	}
+	return s.sessionEmail(req)
+}
+
+// sessionEmail identifies the user from a browser session cookie only.
+func (s *Server) sessionEmail(req *http.Request) (string, bool) {
 	cookie, err := req.Cookie("helppeer_session")
 	if err != nil {
 		return "", false

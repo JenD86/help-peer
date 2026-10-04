@@ -284,3 +284,41 @@ func TestCancel(t *testing.T) {
 		t.Fatalf("get after cancel: %d", r.StatusCode)
 	}
 }
+
+func TestHead(t *testing.T) {
+	_, srv := newTestRelay(t)
+	url := srv.URL + "/manifest/" + testHash
+	if r := do(t, "HEAD", url, nil, nil); r.StatusCode != 404 {
+		t.Fatalf("head missing: %d", r.StatusCode)
+	}
+	// Even manifests consumed on fetch (no ack hash) aren't consumed by HEAD.
+	do(t, "PUT", url, []byte("data"), nil)
+	for i := 0; i < 2; i++ {
+		if r := do(t, "HEAD", url, nil, nil); r.StatusCode != 200 {
+			t.Fatalf("head %d: %d", i, r.StatusCode)
+		}
+	}
+	if r := do(t, "GET", url, nil, nil); r.StatusCode != 200 {
+		t.Fatalf("get after head: %d", r.StatusCode)
+	}
+}
+
+func TestTrustedTokenBypassesLimits(t *testing.T) {
+	relay, srv := newTestRelay(t)
+	relay.trustedToken = "s3cret"
+	url := srv.URL + "/manifest/" + testHash
+
+	for i := 0; i < 5; i++ {
+		if r := do(t, "GET", url, nil, map[string]string{"X-Relay-Token": "s3cret"}); r.StatusCode != 404 {
+			t.Fatalf("trusted miss %d: %d", i, r.StatusCode)
+		}
+	}
+	// A wrong token is just an ordinary client.
+	codes := []int{}
+	for i := 0; i < 4; i++ {
+		codes = append(codes, do(t, "GET", url, nil, map[string]string{"X-Relay-Token": "nope"}).StatusCode)
+	}
+	if codes[3] != 429 {
+		t.Fatalf("untrusted client not limited: %v", codes)
+	}
+}

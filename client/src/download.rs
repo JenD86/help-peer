@@ -17,6 +17,8 @@ pub struct DownloadResult {
     /// Whether the relay accepted our confirmation. If it didn't, the
     /// manifest simply stays until it expires.
     pub acknowledged: bool,
+    /// The transfer's relay key (used to clear it from the user's inbox).
+    pub relay_hash: String,
 }
 
 /// Download and reconstruct a transfer using a code.
@@ -136,6 +138,7 @@ pub async fn download_transfer(
         manifest,
         file_hashes,
         acknowledged: ack.is_ok(),
+        relay_hash,
     })
 }
 

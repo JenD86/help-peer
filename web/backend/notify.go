@@ -10,16 +10,15 @@ import (
 	"net/smtp"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // NotifyRequest is the JSON body for the notify API.
 type NotifyRequest struct {
 	TransferID   string   `json:"transfer_id"`
+	ManifestHash string   `json:"manifest_hash"`
 	Code         string   `json:"code"`
-	TransferName string   `json:"transfer_name"`
-	Recipients   []string `json:"recipients"`
-	Files        int      `json:"files"`
-	TotalBytes   int64    `json:"total_bytes"`
+	Recipients   []string `json:"recipients"` // emails and/or usernames ("alice" or "@alice")
 }
 
 const maxRecipientsPerRequest = 20
@@ -28,6 +27,9 @@ const maxRecipientsPerRequest = 20
 // rejected so this endpoint can't be used to email arbitrary text.
 var codeRe = regexp.MustCompile(`^[a-z]+(-[a-z]+){5}$`)
 
+// notifyHandler tells recipients about a transfer. Email addresses get the
+// code by email; usernames get it in their inbox on this site plus an email
+// alert that doesn't include it.
 func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -51,22 +53,57 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid transfer code")
 		return
 	}
+	if !isHexHash(body.ManifestHash) {
+		writeError(w, http.StatusBadRequest, "invalid manifest hash")
+		return
+	}
 	if len(body.Recipients) == 0 || len(body.Recipients) > maxRecipientsPerRequest {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("between 1 and %d recipients required", maxRecipientsPerRequest))
 		return
 	}
+
+	// Sort recipients into email addresses and usernames, refusing the
+	// whole request if any is invalid so nobody gets a partial send.
+	var emails []string
+	inboxTo := map[string]string{} // username -> email
+	var bad []string
 	for _, r := range body.Recipients {
-		if !isValidEmail(r) {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid email: %s", r))
-			return
+		r = strings.TrimSpace(r)
+		if strings.Contains(strings.TrimPrefix(r, "@"), "@") {
+			if !isValidEmail(r) {
+				bad = append(bad, r)
+				continue
+			}
+			emails = append(emails, r)
+			continue
 		}
+		name := normalizeUsername(r)
+		email, ok := s.db.EmailForUsername(name)
+		if !ok {
+			bad = append(bad, r)
+			continue
+		}
+		inboxTo[name] = email
+	}
+	if len(bad) > 0 {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown recipients: %s", strings.Join(bad, ", ")))
+		return
 	}
 
-	// Only the sender of a transfer uploaded through this server can send
-	// notifications about it, and only so many per hour.
+	// Only the sender of a transfer they registered here can send
+	// notifications about it, the transfer must really exist on the relay,
+	// and only so many go out per hour.
 	record, ok := s.db.GetTransfer(body.TransferID)
 	if !ok || record.SenderEmail != senderEmail {
 		writeError(w, http.StatusNotFound, "transfer not found")
+		return
+	}
+	switch s.manifestExists(body.ManifestHash) {
+	case existsNo:
+		writeError(w, http.StatusNotFound, "transfer not found on the relay")
+		return
+	case existsUnknown:
+		writeError(w, http.StatusBadGateway, "relay unavailable")
 		return
 	}
 	if !s.notifyLimit.Allow(senderEmail, len(body.Recipients)) {
@@ -74,29 +111,49 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Use the server's own record of the transfer, not the client's claims.
-	transferName := record.TransferName
-	files, totalBytes := record.Files, record.TotalBytes
-
 	s.db.SetRecipients(record.ID, senderEmail, body.Recipients)
 
-	if s.smtpConfig.Host == "" {
-		// Dev mode: log notifications
-		for _, r := range body.Recipients {
-			log.Printf("[DEV] Email to %s: Transfer '%s' code: %s", r, transferName, body.Code)
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":  "logged",
-			"sent":    len(body.Recipients),
-			"message": "SMTP not configured — emails logged to console",
-		})
-		return
+	sender, _ := s.db.GetUser(senderEmail)
+	senderName := senderEmail
+	if sender.Username != "" {
+		senderName = sender.Username
 	}
 
-	sent := 0
+	sent, inboxed := 0, 0
 	errors := []string{}
-	for _, recipient := range body.Recipients {
-		if err := sendTransferEmail(s.smtpConfig, recipient, body.Code, transferName, senderEmail, files, totalBytes); err != nil {
+
+	for name, email := range inboxTo {
+		s.db.AddInboxItem(&InboxItem{
+			ID:             generateToken(16),
+			RecipientEmail: email,
+			SenderEmail:    senderEmail,
+			SenderUsername: sender.Username,
+			TransferName:   record.TransferName,
+			Files:          record.Files,
+			TotalBytes:     record.TotalBytes,
+			Code:           body.Code,
+			ManifestHash:   body.ManifestHash,
+			CreatedAt:      time.Now(),
+			ExpiresAt:      time.Now().Add(inboxTTL),
+		})
+		inboxed++
+		if s.smtpConfig.Host == "" {
+			log.Printf("[DEV] Inbox alert to %s (@%s): transfer '%s' from %s", email, name, record.TransferName, senderName)
+			continue
+		}
+		if err := sendInboxAlertEmail(s.smtpConfig, email, s.auth.baseURL, senderName, record.TransferName, record.Files, record.TotalBytes); err != nil {
+			log.Printf("Failed to send inbox alert to %s: %v", email, err)
+			errors = append(errors, fmt.Sprintf("alert email failed for @%s (the transfer is still in their inbox)", name))
+		}
+	}
+
+	for _, recipient := range emails {
+		if s.smtpConfig.Host == "" {
+			log.Printf("[DEV] Email to %s: Transfer '%s' code: %s", recipient, record.TransferName, body.Code)
+			sent++
+			continue
+		}
+		if err := sendTransferEmail(s.smtpConfig, recipient, body.Code, record.TransferName, senderName, record.Files, record.TotalBytes); err != nil {
 			log.Printf("Failed to send email to %s: %v", recipient, err)
 			errors = append(errors, fmt.Sprintf("failed: %s", recipient))
 			continue
@@ -105,9 +162,10 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status": "ok",
-		"sent":   sent,
-		"errors": errors,
+		"status":  "ok",
+		"sent":    sent,
+		"inboxed": inboxed,
+		"errors":  errors,
 	})
 }
 
@@ -144,6 +202,27 @@ Click the link below to log in to Help Peer:
 This link expires in 15 minutes. If you didn't request this, you can safely ignore this email.
 
 — Help Peer`, magicURL)
+
+	return sendEmail(smtpCfg, to, subject, body)
+}
+
+func sendInboxAlertEmail(smtpCfg *SMTPConfig, to, baseURL, senderName, transferName string, files int, totalBytes int64) error {
+	subject := fmt.Sprintf("Help Peer — %s sent you files", senderName)
+	body := fmt.Sprintf(`Hello,
+
+%s has sent you files via Help Peer.
+
+  Transfer: %s
+  Files: %d
+  Size: %s
+
+They're waiting in your inbox (log in to see them):
+
+  %s/inbox
+
+The transfer expires in 24 hours.
+
+— Help Peer`, senderName, transferName, files, formatBytes(totalBytes), baseURL)
 
 	return sendEmail(smtpCfg, to, subject, body)
 }

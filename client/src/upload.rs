@@ -16,12 +16,12 @@ pub struct UploadConfig {
 }
 
 /// Upload a file or directory to the network.
-/// Returns the transfer code and the manifest that was sent.
+/// Returns the transfer code, its relay hash, and the manifest that was sent.
 pub async fn upload_path(
     path: &Path,
     transfer_name: &str,
     config: &UploadConfig,
-) -> Result<(String, Manifest), String> {
+) -> Result<(String, String, Manifest), String> {
     if config.storage_nodes.is_empty() {
         return Err("no storage nodes configured".into());
     }
@@ -125,7 +125,7 @@ pub async fn upload_path(
     let ack_hash = crypto::secret_hash(&manifest.ack_secret);
     http::put(&client, &url, &encrypted_manifest, &[("X-Ack-Hash", &ack_hash)], "manifest upload").await?;
 
-    Ok((code, manifest))
+    Ok((code, relay_hash, manifest))
 }
 
 /// Upload a shard to its round-robin node, falling back to the next healthy
