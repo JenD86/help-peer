@@ -554,3 +554,32 @@ func TestAck(t *testing.T) {
 		t.Fatal("manifest not consumed")
 	}
 }
+
+func TestRateLimitsSurviveRestart(t *testing.T) {
+	e := newTestEnv(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	path := filepath.Join(t.TempDir(), "ratelimits.json")
+
+	// Use up the per-email login allowance, then "restart".
+	for i := 0; i < 3; i++ {
+		resp := e.post(t, "/api/auth/request", map[string]string{"email": "victim@example.com"}, "")
+		resp.Body.Close()
+	}
+	if err := newLimiterStore(path, e.s.limiters()...).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := newTestEnv(t)
+	newLimiterStore(path, restarted.s.limiters()...).Load()
+	resp := restarted.post(t, "/api/auth/request", map[string]string{"email": "victim@example.com"}, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after restart, got %d", resp.StatusCode)
+	}
+	resp = restarted.post(t, "/api/auth/request", map[string]string{"email": "someone-else@example.com"}, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("other email: %d", resp.StatusCode)
+	}
+}

@@ -186,7 +186,7 @@ If a node fails while sending, its shards are stored on the remaining nodes inst
 - **Safetensors validation**: The header of each `.safetensors` file is validated when its first segment arrives
 - **Confirmed retrieval**: The relay deletes a manifest once the receiver confirms a verified download, using a secret from inside the encrypted manifest (or once each recipient has, for multi-recipient transfers via `X-Max-Retrievals`). Until then, failed downloads can be retried with the same code
 - **Delete tokens**: Shards can only be deleted early with a token from the encrypted manifest; otherwise they expire by TTL
-- **Rate limiting**: The relay and web backend throttle clients that make repeated failed manifest lookups (code guessing) and limit manifest uploads per client; the relay also caps its total storage. The web backend limits login and notification emails
+- **Rate limiting**: The relay and web backend throttle clients that make repeated failed manifest lookups (code guessing) and limit manifest uploads per client; the relay also caps its total storage. The web backend limits login and notification emails. Limits are saved to `ratelimits.json` in each service's data directory (every 10 seconds and on shutdown), so restarting doesn't reset them
 - **TTL expiry**: Shards and manifests auto-expire after 24 hours, including across restarts
 - **Web trust model**: The web backend serves the page that does the encryption, so web users trust the server operator not to tamper with it. The server never stores transfer codes
 

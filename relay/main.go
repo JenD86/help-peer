@@ -7,14 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"lukechampine.com/blake3"
@@ -70,12 +71,18 @@ func main() {
 		maxManifestBytes: int64(envInt("RELAY_MAX_MANIFEST_BYTES", 32<<20)),
 		maxTotalBytes:    int64(envInt("RELAY_MAX_TOTAL_BYTES", 1<<30)),
 		defaultRetrieval: envInt("RELAY_MAX_RETRIEVALS", 1),
-		misses:           newRateLimiter(envInt("RELAY_MISS_LIMIT", 30), time.Minute),
-		puts:             newRateLimiter(envInt("RELAY_PUT_LIMIT", 120), time.Minute),
+		misses:           newRateLimiter("misses", envInt("RELAY_MISS_LIMIT", 30), time.Minute),
+		puts:             newRateLimiter("puts", envInt("RELAY_PUT_LIMIT", 120), time.Minute),
 	}
 	relay.usedBytes = relay.measureUsage()
 
 	go relay.cleanupLoop()
+
+	// Keep rate limits across restarts, saving on shutdown as well.
+	limits := newLimiterStore(filepath.Join(dataDir, "ratelimits.json"), relay.misses, relay.puts)
+	limits.Load()
+	go limits.Run()
+	saveOnExit(limits)
 
 	addr := ":" + port
 	log.Printf("Help Peer Relay Server listening on %s (ttl: %s)", addr, relay.ttl)
@@ -407,80 +414,18 @@ func writeFileAtomic(path string, data []byte) error {
 	return nil
 }
 
-func clientIP(req *http.Request) string {
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
-	if err != nil {
-		return req.RemoteAddr
-	}
-	return host
-}
-
-// rateLimiter allows `limit` hits per key per fixed window (0 = unlimited).
-type rateLimiter struct {
-	mu     sync.Mutex
-	limit  int
-	window time.Duration
-	counts map[string]*rateWindow
-}
-
-type rateWindow struct {
-	start time.Time
-	n     int
-}
-
-func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{limit: limit, window: window, counts: make(map[string]*rateWindow)}
-}
-
-func (l *rateLimiter) current(key string) *rateWindow {
-	w, ok := l.counts[key]
-	if !ok || time.Since(w.start) >= l.window {
-		w = &rateWindow{start: time.Now()}
-		l.counts[key] = w
-	}
-	return w
-}
-
-// Exceeded reports whether key has used up its allowance for this window.
-func (l *rateLimiter) Exceeded(key string) bool {
-	if l.limit <= 0 {
-		return false
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.current(key).n >= l.limit
-}
-
-// Allow consumes one unit for key, or reports false if none are left.
-func (l *rateLimiter) Allow(key string) bool {
-	if l.limit <= 0 {
-		return true
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	w := l.current(key)
-	if w.n >= l.limit {
-		return false
-	}
-	w.n++
-	return true
-}
-
-func (l *rateLimiter) Hit(key string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.current(key).n++
-}
-
-// Prune drops windows that have ended so the map doesn't grow without bound.
-func (l *rateLimiter) Prune() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for k, w := range l.counts {
-		if time.Since(w.start) >= l.window {
-			delete(l.counts, k)
+// saveOnExit saves rate limits when the process is asked to stop
+// (Ctrl-C, or SIGTERM from `docker stop`).
+func saveOnExit(limits *limiterStore) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		if err := limits.Save(); err != nil {
+			log.Printf("Failed to save rate limits: %v", err)
 		}
-	}
+		os.Exit(0)
+	}()
 }
 
 func envOr(key, def string) string {

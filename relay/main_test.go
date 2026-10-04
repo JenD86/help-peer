@@ -25,8 +25,8 @@ func newTestRelay(t *testing.T) (*Relay, *httptest.Server) {
 		maxManifestBytes: 1024,
 		maxTotalBytes:    4096,
 		defaultRetrieval: 1,
-		misses:           newRateLimiter(3, time.Minute),
-		puts:             newRateLimiter(100, time.Minute),
+		misses:           newRateLimiter("misses", 3, time.Minute),
+		puts:             newRateLimiter("puts", 100, time.Minute),
 	}
 	srv := httptest.NewServer(r.routes())
 	t.Cleanup(srv.Close)
@@ -200,7 +200,7 @@ func TestAckCountsRetrievals(t *testing.T) {
 
 func TestPutRateLimit(t *testing.T) {
 	relay, srv := newTestRelay(t)
-	relay.puts = newRateLimiter(2, time.Minute)
+	relay.puts = newRateLimiter("puts", 2, time.Minute)
 	codes := []int{}
 	for i := 0; i < 3; i++ {
 		h := strings.Repeat(string("abc"[i]), 64)
@@ -229,5 +229,37 @@ func TestTotalSizeCap(t *testing.T) {
 	}
 	if r := do(t, "PUT", srv.URL+"/manifest/"+strings.Repeat("e", 64), big, nil); r.StatusCode != 201 {
 		t.Fatalf("put after freeing space: %d", r.StatusCode)
+	}
+}
+
+func TestRateLimitsSurviveRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ratelimits.json")
+
+	misses := newRateLimiter("misses", 3, time.Minute)
+	puts := newRateLimiter("puts", 3, time.Minute)
+	for i := 0; i < 3; i++ {
+		misses.Hit("1.2.3.4")
+	}
+	puts.Allow("5.6.7.8")
+	// An expired window must not come back.
+	puts.counts["9.9.9.9"] = &rateWindow{start: time.Now().Add(-2 * time.Minute), n: 3}
+	if err := newLimiterStore(path, misses, puts).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	misses2 := newRateLimiter("misses", 3, time.Minute)
+	puts2 := newRateLimiter("puts", 3, time.Minute)
+	newLimiterStore(path, misses2, puts2).Load()
+	if !misses2.Exceeded("1.2.3.4") {
+		t.Fatal("exhausted client got a fresh allowance after restart")
+	}
+	if misses2.Exceeded("5.6.7.8") || puts2.counts["5.6.7.8"].n != 1 {
+		t.Fatal("limiter state mixed up between limiters")
+	}
+	if _, ok := puts2.counts["9.9.9.9"]; ok {
+		t.Fatal("expired window restored")
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0600 {
+		t.Fatalf("state file mode %v", info.Mode().Perm())
 	}
 }

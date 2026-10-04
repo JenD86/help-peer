@@ -26,8 +26,8 @@ func NewAuth(db *DB, smtp *SMTPConfig, baseURL string) *Auth {
 		db:               db,
 		smtpConfig:       smtp,
 		baseURL:          baseURL,
-		requestsPerIP:    newRateLimiter(10, 15*time.Minute),
-		requestsPerEmail: newRateLimiter(3, 15*time.Minute),
+		requestsPerIP:    newRateLimiter("login-ip", 10, 15*time.Minute),
+		requestsPerEmail: newRateLimiter("login-email", 3, 15*time.Minute),
 	}
 }
 

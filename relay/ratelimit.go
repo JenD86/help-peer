@@ -6,12 +6,19 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 )
 
-// rateLimiter allows `limit` units per key per fixed window.
+func clientIP(req *http.Request) string {
+	host, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return req.RemoteAddr
+	}
+	return host
+}
+
+// rateLimiter allows `limit` hits per key per fixed window (0 = unlimited).
 type rateLimiter struct {
 	name   string // identifies it in the saved state file
 	mu     sync.Mutex
@@ -26,13 +33,7 @@ type rateWindow struct {
 }
 
 func newRateLimiter(name string, limit int, window time.Duration) *rateLimiter {
-	l := &rateLimiter{name: name, limit: limit, window: window, counts: make(map[string]*rateWindow)}
-	go func() {
-		for range time.Tick(window) {
-			l.prune()
-		}
-	}()
-	return l
+	return &rateLimiter{name: name, limit: limit, window: window, counts: make(map[string]*rateWindow)}
 }
 
 func (l *rateLimiter) current(key string) *rateWindow {
@@ -44,35 +45,39 @@ func (l *rateLimiter) current(key string) *rateWindow {
 	return w
 }
 
-// Allow consumes n units for key, or reports false (consuming nothing) if
-// that would exceed the limit.
-func (l *rateLimiter) Allow(key string, n int) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	w := l.current(key)
-	if w.n+n > l.limit {
+// Exceeded reports whether key has used up its allowance for this window.
+func (l *rateLimiter) Exceeded(key string) bool {
+	if l.limit <= 0 {
 		return false
 	}
-	w.n += n
-	return true
-}
-
-// Exceeded reports whether key has used up its allowance, without consuming any.
-func (l *rateLimiter) Exceeded(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.current(key).n >= l.limit
 }
 
-// Hit consumes one unit for key.
+// Allow consumes one unit for key, or reports false if none are left.
+func (l *rateLimiter) Allow(key string) bool {
+	if l.limit <= 0 {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := l.current(key)
+	if w.n >= l.limit {
+		return false
+	}
+	w.n++
+	return true
+}
+
 func (l *rateLimiter) Hit(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.current(key).n++
 }
 
-// prune drops windows that have ended so the map doesn't grow without bound.
-func (l *rateLimiter) prune() {
+// Prune drops windows that have ended so the map doesn't grow without bound.
+func (l *rateLimiter) Prune() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for k, w := range l.counts {
@@ -83,8 +88,8 @@ func (l *rateLimiter) prune() {
 }
 
 // limiterStore saves rate-limiter state to a file so limits survive
-// restarts; otherwise restarting the service would hand every client (and
-// every login/notification email quota) a fresh allowance.
+// restarts; otherwise restarting the service would hand every client a
+// fresh allowance.
 type limiterStore struct {
 	path     string
 	limiters []*rateLimiter
@@ -119,8 +124,12 @@ func (s *limiterStore) Save() error {
 	if err != nil {
 		return err
 	}
-	// Private: the file lists client addresses and emails.
-	return writeFileAtomic(s.path, data)
+	// Private: the file lists client addresses.
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
 }
 
 // Load restores windows saved by a previous run, skipping expired ones.
@@ -152,26 +161,4 @@ func (s *limiterStore) Run() {
 			log.Printf("Failed to save rate limits: %v", err)
 		}
 	}
-}
-
-// trustProxy makes clientIP use X-Forwarded-For. Only enable it when the
-// backend is reachable solely through a reverse proxy that sets the header,
-// otherwise clients can spoof their address to dodge rate limits.
-var trustProxy bool
-
-// clientIP identifies the caller for rate limiting.
-func clientIP(req *http.Request) string {
-	if trustProxy {
-		// The proxy appends the address it saw, so the last entry is the one
-		// we can trust.
-		if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			return strings.TrimSpace(parts[len(parts)-1])
-		}
-	}
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
-	if err != nil {
-		return req.RemoteAddr
-	}
-	return host
 }

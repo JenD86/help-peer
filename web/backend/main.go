@@ -8,9 +8,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -109,6 +112,12 @@ func main() {
 
 	server := NewServer(db, relayURL, storageNodes, smtpConfig, baseURL, staticSub)
 
+	// Keep rate limits across restarts, saving on shutdown as well.
+	limits := newLimiterStore(filepath.Join(dataDir, "ratelimits.json"), server.limiters()...)
+	limits.Load()
+	go limits.Run()
+	saveOnExit(limits)
+
 	log.Printf("Help Peer Web Backend listening on :%s (relay: %s, nodes: %v)", port, relayURL, storageNodes)
 	log.Fatal(http.ListenAndServe(":"+port, server.routes()))
 }
@@ -122,10 +131,32 @@ func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, b
 		smtpConfig:      smtp,
 		static:          static,
 		health:          &nodeHealth{downUntil: map[int]time.Time{}},
-		manifestMisses:  newRateLimiter(30, time.Minute),
-		manifestUploads: newRateLimiter(30, time.Minute),
-		notifyLimit:     newRateLimiter(50, time.Hour),
+		manifestMisses:  newRateLimiter("manifest-misses", 30, time.Minute),
+		manifestUploads: newRateLimiter("manifest-uploads", 30, time.Minute),
+		notifyLimit:     newRateLimiter("notify", 50, time.Hour),
 	}
+}
+
+// limiters lists every rate limiter, for saving their state.
+func (s *Server) limiters() []*rateLimiter {
+	return []*rateLimiter{
+		s.manifestMisses, s.manifestUploads, s.notifyLimit,
+		s.auth.requestsPerIP, s.auth.requestsPerEmail,
+	}
+}
+
+// saveOnExit saves rate limits when the process is asked to stop
+// (Ctrl-C, or SIGTERM from `docker stop`).
+func saveOnExit(limits *limiterStore) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		if err := limits.Save(); err != nil {
+			log.Printf("Failed to save rate limits: %v", err)
+		}
+		os.Exit(0)
+	}()
 }
 
 func (s *Server) routes() http.Handler {
