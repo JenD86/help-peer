@@ -112,6 +112,8 @@ func (r *Relay) manifestHandler(w http.ResponseWriter, req *http.Request) {
 		r.putManifest(w, req, hash)
 	case action == "" && req.Method == http.MethodGet:
 		r.getManifest(w, req, hash)
+	case action == "" && req.Method == http.MethodDelete:
+		r.cancelManifest(w, req, hash)
 	case action == "ack" && req.Method == http.MethodPost:
 		r.ackManifest(w, req, hash)
 	case action == "" || action == "ack":
@@ -241,31 +243,63 @@ func (r *Relay) getManifest(w http.ResponseWriter, req *http.Request, hash strin
 // ackManifest records a completed download. The body is the hex ack secret
 // from inside the encrypted manifest, which proves the caller decrypted it.
 func (r *Relay) ackManifest(w http.ResponseWriter, req *http.Request, hash string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	manifestPath, meta, ok := r.authorize(w, req, hash)
+	if !ok {
+		return
+	}
+	if err := r.consume(manifestPath, meta); err != nil {
+		log.Printf("Failed to update manifest metadata: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// cancelManifest withdraws a transfer immediately, whatever retrievals are
+// left. It takes the same proof as ackManifest: anyone who can decrypt the
+// manifest (the sender or a recipient) can cancel it.
+func (r *Relay) cancelManifest(w http.ResponseWriter, req *http.Request, hash string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	manifestPath, _, ok := r.authorize(w, req, hash)
+	if !ok {
+		return
+	}
+	r.deleteManifest(manifestPath)
+	log.Printf("Manifest %s cancelled", hash[:12])
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// authorize checks the hex ack secret in the request body against the
+// manifest's ack hash, writing an error response if it doesn't match.
+// Requires r.mu.
+func (r *Relay) authorize(w http.ResponseWriter, req *http.Request, hash string) (string, manifestMeta, bool) {
 	ip := clientIP(req)
 	if r.misses.Exceeded(ip) {
 		http.Error(w, "too many failed requests", http.StatusTooManyRequests)
-		return
+		return "", manifestMeta{}, false
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, 256))
 	if err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
-		return
+		return "", manifestMeta{}, false
 	}
 	secret, err := hex.DecodeString(strings.TrimSpace(string(body)))
 	if err != nil || len(secret) != 32 {
 		http.Error(w, "invalid ack secret", http.StatusBadRequest)
-		return
+		return "", manifestMeta{}, false
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	manifestPath := r.manifestPath(hash)
 	if _, err := os.Stat(manifestPath); err != nil || r.expireIfDue(manifestPath) {
 		r.misses.Hit(ip)
 		http.Error(w, "not found", http.StatusNotFound)
-		return
+		return "", manifestMeta{}, false
 	}
 
 	meta := r.readMeta(manifestPath)
@@ -273,15 +307,9 @@ func (r *Relay) ackManifest(w http.ResponseWriter, req *http.Request, hash strin
 	if meta.AckHash == "" || subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(meta.AckHash)) != 1 {
 		r.misses.Hit(ip)
 		http.Error(w, "wrong ack secret", http.StatusForbidden)
-		return
+		return "", manifestMeta{}, false
 	}
-
-	if err := r.consume(manifestPath, meta); err != nil {
-		log.Printf("Failed to update manifest metadata: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	return manifestPath, meta, true
 }
 
 // consume uses up one retrieval, deleting the manifest after the last one.

@@ -121,7 +121,16 @@ the request may have reached the relay (it isn't idempotent).
 | `404 Not Found` | No such manifest, or expired |
 | `429 Too Many Requests` | Too many failed lookups from this client |
 
-### 1.4 GET /health
+### 1.4 DELETE /manifest/{hash}
+
+Cancel a transfer: delete the manifest immediately, regardless of retrievals
+left. The body is the hex `ack_secret`, checked exactly as in 1.3 (same
+responses), so anyone who can decrypt the manifest — the sender or a
+recipient — can cancel it. Clients should then delete the shards with the
+manifest's `delete_token` (2.3). Like confirmation, this must not be retried
+once the request may have reached the relay.
+
+### 1.5 GET /health
 
 **Response:**
 ```json

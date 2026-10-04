@@ -3,7 +3,7 @@ import argparse
 import json
 import sys
 
-from . import send, receive, configure
+from . import send, receive, cancel, configure
 
 
 def main():
@@ -26,6 +26,9 @@ def main():
     recv_cmd.add_argument("code", help="Transfer code (e.g., orbit-velvet-zoom-candle-harbor-ember)")
     recv_cmd.add_argument("--output", default="./received", help="Output directory")
 
+    cancel_cmd = sub.add_parser("cancel", help="Cancel a transfer before it expires")
+    cancel_cmd.add_argument("code", help="Transfer code")
+
     args = parser.parse_args()
 
     # CLI flags override HELPEER_* environment variables
@@ -37,6 +40,8 @@ def main():
     try:
         if args.command == "send":
             _send(args)
+        elif args.command == "cancel":
+            _cancel(args)
         else:
             _receive(args)
     except Exception as e:  # report any failure cleanly instead of a traceback
@@ -85,6 +90,20 @@ def _receive(args):
     print("  File hashes (BLAKE3, verified against sender):")
     for path, h in result["file_hashes"].items():
         print(f"  {path} → {h}")
+
+
+def _cancel(args):
+    result = cancel(args.code)
+
+    if args.json:
+        print(json.dumps({"status": "ok", **result}, indent=2))
+        return
+    print(f"✓ Transfer cancelled: {result['transfer_name']}")
+    print(f"  Deleted {result['shards_deleted']} shards "
+          f"({result['shards_already_gone']} had already expired or been deleted)")
+    if result["shards_failed"]:
+        print(f"  {result['shards_failed']} shards could not be deleted (node unreachable); "
+              "they expire within 24 hours")
 
 
 if __name__ == "__main__":

@@ -98,6 +98,9 @@ STORAGE_BACKEND=s3 S3_BUCKET=my-bucket S3_ACCESS_KEY=... S3_SECRET_KEY=... \
 # Send a single file
 ./client/target/release/helppeer send ./model.safetensors
 
+# Cancel a transfer before it expires (removes it from the relay and deletes its shards)
+./client/target/release/helppeer cancel orbit-velvet-zoom-candle-harbor-ember
+
 # Machine-readable JSON output (for agents/scripts)
 ./client/target/release/helppeer --json send ./my-model/ --name "Llama-3-70B"
 ./client/target/release/helppeer --json receive orbit-velvet-zoom-candle-harbor-ember --output ./received/
@@ -113,6 +116,9 @@ print(f"Transfer code: {code}")
 
 # Receive a transfer
 helppeer.receive("orbit-velvet-zoom-candle-harbor-ember", output_dir="./received")
+
+# Cancel a transfer before it expires
+helppeer.cancel("orbit-velvet-zoom-candle-harbor-ember")
 
 # Get structured result (for agents)
 result = helppeer.send("./my-model", name="Llama-3-70B", return_details=True)
@@ -134,7 +140,7 @@ python -m helppeer --help                                       # also works
 ```
 
 **Web UI:**
-Open `http://localhost:8080` in your browser. Drag & drop files to send, or enter a code to receive. Files are encrypted in the browser and uploaded 64MB at a time; the backend only ever sees ciphertext, which it erasure-codes and stores. In Chromium-based browsers, received files stream straight into a folder you pick; other browsers assemble each file in memory, so use the CLI for very large transfers there. A failed browser download can be retried with the same code but starts over, whereas the CLI and Python SDK resume. Log in with email for transfer history and to email the code to recipients (the code then passes through the server and the recipients' mail providers).
+Open `http://localhost:8080` in your browser. Drag & drop files to send, or enter a code to receive. Files are encrypted in the browser and uploaded 64MB at a time; the backend only ever sees ciphertext, which it erasure-codes and stores. In Chromium-based browsers, received files stream straight into a folder you pick; other browsers assemble each file in memory, so use the CLI for very large transfers there. A failed browser download can be retried with the same code but starts over, whereas the CLI and Python SDK resume. After sending, the "Cancel transfer" button withdraws the transfer and deletes its stored data (or use `helppeer cancel <code>` later). Log in with email for transfer history and to email the code to recipients (the code then passes through the server and the recipients' mail providers).
 
 ### Multiple Storage Nodes
 
@@ -185,7 +191,7 @@ If a node fails while sending, its shards are stored on the remaining nodes inst
 - **Manifest validation**: Receivers check the manifest's sizes, indexes and paths before allocating or writing anything
 - **Safetensors validation**: The header of each `.safetensors` file is validated when its first segment arrives
 - **Confirmed retrieval**: The relay deletes a manifest once the receiver confirms a verified download, using a secret from inside the encrypted manifest (or once each recipient has, for multi-recipient transfers via `X-Max-Retrievals`). Until then, failed downloads can be retried with the same code
-- **Delete tokens**: Shards can only be deleted early with a token from the encrypted manifest; otherwise they expire by TTL
+- **Delete tokens**: Shards can only be deleted early with a token from the encrypted manifest (used by `helppeer cancel`); otherwise they expire by TTL
 - **Rate limiting**: The relay and web backend throttle clients that make repeated failed manifest lookups (code guessing) and limit manifest uploads per client; the relay also caps its total storage. The web backend limits login and notification emails. Limits are saved to `ratelimits.json` in each service's data directory (every 10 seconds and on shutdown), so restarting doesn't reset them
 - **TTL expiry**: Shards and manifests auto-expire after 24 hours, including across restarts
 - **Web trust model**: The web backend serves the page that does the encryption, so web users trust the server operator not to tamper with it. The server never stores transfer codes
@@ -285,6 +291,7 @@ help-peer/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── main.rs                            # CLI entry point (--json mode)
+│       ├── cancel.rs                          # Cancel a transfer early
 │       ├── crypto.rs                          # AES-GCM, HKDF, BLAKE3
 │       ├── http.rs                            # Shared HTTP client with timeouts + retries
 │       ├── resume.rs                          # Progress log for resuming downloads
@@ -316,6 +323,7 @@ help-peer/
 │   │   ├── upload.go                           # Erasure coding + shard upload, manifest upload
 │   │   ├── download.go                         # Shard download + reconstruction
 │   │   ├── notify.go                           # SMTP email notifications
+│   │   ├── cancel.go                           # Cancel a transfer sent from the browser
 │   │   ├── ratelimit.go                        # Per-client rate limiting
 │   │   └── *_test.go
 │   └── frontend/                               # React frontend (Vite + Tailwind)

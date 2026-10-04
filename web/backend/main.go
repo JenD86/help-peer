@@ -172,6 +172,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/download", s.downloadHandler)
 	mux.HandleFunc("/api/download/segment", s.segmentDownloadHandler)
 	mux.HandleFunc("/api/download/ack", s.ackHandler)
+	mux.HandleFunc("/api/cancel", s.cancelHandler)
 	mux.HandleFunc("/api/notify", s.notifyHandler)
 	mux.HandleFunc("/api/history", s.historyHandler)
 	mux.HandleFunc("/api/health", s.healthHandler)

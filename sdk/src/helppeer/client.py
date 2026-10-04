@@ -229,6 +229,54 @@ def receive(
     }
 
 
+def cancel(code: str) -> Dict[str, Any]:
+    """Cancel a transfer before it expires.
+
+    Removes the manifest from the relay so nobody can start receiving it,
+    then deletes its shards from the storage nodes using the manifest's
+    delete token. Shards on unreachable nodes still expire with the TTL.
+
+    Returns:
+        Dict with transfer_name, shards_deleted, shards_already_gone, shards_failed.
+    """
+    config = get_config()
+    k_data, k_index = crypto.derive_keys(code)
+    r_hash = crypto.relay_hash(k_index)
+    manifest_url = f"{config.relay_url}/manifest/{r_hash}"
+
+    with _session() as session:
+        encrypted_manifest = _download_manifest(session, config.relay_url, r_hash)
+        manifest = Manifest.from_json(crypto.decrypt_segment(k_data, encrypted_manifest))
+        manifest.validate()
+
+        # Withdraw the manifest first so no new download can start. (The
+        # session doesn't retry DELETE after it may have reached the relay.)
+        resp = session.delete(manifest_url, data=manifest.ack_secret, timeout=TIMEOUT)
+        if resp.status_code != 204:
+            raise RuntimeError(f"relay refused to cancel the transfer (status {resp.status_code})")
+
+        def delete_shard(shard: ManifestShard) -> str:
+            try:
+                r = session.delete(
+                    f"{shard.node}/shard/{shard.hash}",
+                    headers={"X-Delete-Token": manifest.delete_token}, timeout=TIMEOUT,
+                )
+            except requests.RequestException:
+                return "failed"
+            return {204: "deleted", 404: "already_gone"}.get(r.status_code, "failed")
+
+        shards = [sh for f in manifest.files for seg in f.segments for sh in seg.shards]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            outcomes = list(pool.map(delete_shard, shards))
+
+    return {
+        "transfer_name": manifest.transfer_name,
+        "shards_deleted": outcomes.count("deleted"),
+        "shards_already_gone": outcomes.count("already_gone"),
+        "shards_failed": outcomes.count("failed"),
+    }
+
+
 def _session() -> requests.Session:
     """A pooled session that retries transient failures (connection errors,
     5xx, 429) with backoff."""
@@ -237,8 +285,9 @@ def _session() -> requests.Session:
         total=3,
         backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
-        # Not POST: a download confirmation isn't idempotent. urllib3 still
-        # retries connection failures, where the request never arrived.
+        # Not POST or DELETE: confirming or cancelling a transfer isn't
+        # idempotent. urllib3 still retries connection failures, where the
+        # request never arrived.
         allowed_methods=frozenset({"GET", "PUT"}),
         raise_on_status=False,
     )

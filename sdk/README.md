@@ -62,6 +62,7 @@ The SDK also installs a `helppeer` CLI:
 helppeer send ./my-model --name "Llama-3-70B"
 helppeer send ./model.safetensors          # single files work too
 helppeer receive orbit-velvet-zoom-candle-harbor-ember --output ./received
+helppeer cancel orbit-velvet-zoom-candle-harbor-ember   # withdraw a transfer before it expires
 
 # Global flags go before the subcommand
 helppeer --relay https://relay.example.com --nodes https://n1.example.com,https://n2.example.com,https://n3.example.com send ./my-model

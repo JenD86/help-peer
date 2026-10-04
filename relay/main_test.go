@@ -263,3 +263,24 @@ func TestRateLimitsSurviveRestart(t *testing.T) {
 		t.Fatalf("state file mode %v", info.Mode().Perm())
 	}
 }
+
+func TestCancel(t *testing.T) {
+	_, srv := newTestRelay(t)
+	url := srv.URL + "/manifest/" + testHash
+	secret := bytes.Repeat([]byte{7}, 32)
+	do(t, "PUT", url, []byte("data"), map[string]string{"X-Ack-Hash": ackHashOf(secret), "X-Max-Retrievals": "5"})
+
+	if r := do(t, "DELETE", url, nil, nil); r.StatusCode != 400 {
+		t.Fatalf("cancel without secret: %d", r.StatusCode)
+	}
+	if r := do(t, "DELETE", url, []byte(hex.EncodeToString(bytes.Repeat([]byte{8}, 32))), nil); r.StatusCode != 403 {
+		t.Fatalf("cancel with wrong secret: %d", r.StatusCode)
+	}
+	// Removes the manifest outright, even with retrievals left.
+	if r := do(t, "DELETE", url, []byte(hex.EncodeToString(secret)), nil); r.StatusCode != 204 {
+		t.Fatalf("cancel: %d", r.StatusCode)
+	}
+	if r := do(t, "GET", url, nil, nil); r.StatusCode != 404 {
+		t.Fatalf("get after cancel: %d", r.StatusCode)
+	}
+}

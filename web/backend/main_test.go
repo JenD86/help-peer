@@ -26,6 +26,7 @@ const publicNode = "http://public-node.example:7001"
 type fakeNode struct {
 	mu     sync.Mutex
 	shards map[string][]byte
+	tokens map[string]string // shard hash -> delete-token hash
 }
 
 func (n *fakeNode) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -45,7 +46,23 @@ func (n *fakeNode) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		n.shards[hash] = data
+		if n.tokens != nil {
+			n.tokens[hash] = req.Header.Get("X-Delete-Token-Hash")
+		}
 		w.WriteHeader(http.StatusCreated)
+	case http.MethodDelete:
+		if _, ok := n.shards[hash]; !ok {
+			http.NotFound(w, req)
+			return
+		}
+		token, _ := hex.DecodeString(req.Header.Get("X-Delete-Token"))
+		sum := blake3.Sum256(token)
+		if n.tokens == nil || hex.EncodeToString(sum[:]) != n.tokens[hash] {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		delete(n.shards, hash)
+		w.WriteHeader(http.StatusNoContent)
 	case http.MethodGet:
 		data, ok := n.shards[hash]
 		if !ok {
@@ -67,7 +84,7 @@ func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	hash := strings.TrimPrefix(req.URL.Path, "/manifest/")
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if strings.HasSuffix(hash, "/ack") {
+	if strings.HasSuffix(hash, "/ack") || req.Method == http.MethodDelete {
 		hash = strings.TrimSuffix(hash, "/ack")
 		secret, _ := io.ReadAll(req.Body)
 		raw, _ := hex.DecodeString(string(secret))
@@ -110,7 +127,7 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T, extraNodes ...StorageNode) *testEnv {
 	t.Helper()
-	node := &fakeNode{shards: map[string][]byte{}}
+	node := &fakeNode{shards: map[string][]byte{}, tokens: map[string]string{}}
 	nodeSrv := httptest.NewServer(node)
 	t.Cleanup(nodeSrv.Close)
 	relay := &fakeRelay{manifests: map[string][]byte{}, ackHashes: map[string]string{}}
@@ -581,5 +598,66 @@ func TestRateLimitsSurviveRestart(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("other email: %d", resp.StatusCode)
+	}
+}
+
+func TestCancel(t *testing.T) {
+	e := newTestEnv(t)
+	token := bytes.Repeat([]byte{3}, 32)
+	tokenSum := blake3.Sum256(token)
+	ackSecret := bytes.Repeat([]byte{4}, 32)
+	ackSum := blake3.Sum256(ackSecret)
+
+	// Upload a segment registered with the real delete-token hash. (Random
+	// data: an all-zero segment would give 12 identical shards.)
+	segment := make([]byte, 5000)
+	rand.Read(segment)
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/api/upload/segment", bytes.NewReader(segment))
+	req.Header.Set("X-Delete-Token-Hash", hex.EncodeToString(tokenSum[:]))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var up SegmentUploadResponse
+	decode(t, resp, &up)
+
+	hash := strings.Repeat("ab", 32)
+	e.relay.manifests[hash] = []byte("enc")
+	e.relay.ackHashes[hash] = hex.EncodeToString(ackSum[:])
+
+	shards := []map[string]string{}
+	for _, sh := range up.Shards {
+		shards = append(shards, map[string]string{"hash": sh.Hash, "node": sh.Node})
+	}
+	// One shard on a node this server doesn't manage is skipped, not fetched.
+	shards = append(shards, map[string]string{"hash": strings.Repeat("cd", 32), "node": "http://169.254.169.254"})
+	body := map[string]interface{}{
+		"manifest_hash": hash,
+		"ack_secret":    hex.EncodeToString(ackSecret),
+		"delete_token":  hex.EncodeToString(token),
+		"shards":        shards,
+	}
+
+	var got map[string]interface{}
+	resp = e.post(t, "/api/cancel", body, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("cancel: %d", resp.StatusCode)
+	}
+	decode(t, resp, &got)
+	if got["shards_deleted"] != float64(TotalShards) || got["shards_failed"] != float64(1) {
+		t.Fatalf("unexpected result %v", got)
+	}
+	if len(e.node.shards) != 0 {
+		t.Fatalf("%d shards left", len(e.node.shards))
+	}
+	if _, ok := e.relay.manifests[hash]; ok {
+		t.Fatal("manifest not removed")
+	}
+
+	// A second cancel finds nothing.
+	resp = e.post(t, "/api/cancel", body, "")
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("second cancel: %d", resp.StatusCode)
 	}
 }

@@ -1,3 +1,4 @@
+mod cancel;
 mod crypto;
 mod download;
 mod erasure;
@@ -41,6 +42,11 @@ enum Commands {
         /// Name for this transfer
         #[arg(long, default_value = "untitled-transfer")]
         name: String,
+    },
+    /// Cancel a transfer before it expires, deleting it from the relay and storage nodes
+    Cancel {
+        /// The transfer code
+        code: String,
     },
     /// Receive a file or directory using a code
     Receive {
@@ -175,5 +181,40 @@ async fn main() {
                 }
             }
         }
+        Commands::Cancel { code } => match cancel::cancel_transfer(&code, &cli.relay).await {
+            Ok(r) => {
+                if cli.json {
+                    let json = serde_json::json!({
+                        "status": "ok",
+                        "transfer_name": r.transfer_name,
+                        "shards_deleted": r.shards_deleted,
+                        "shards_already_gone": r.shards_already_gone,
+                        "shards_failed": r.shards_failed,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json).unwrap());
+                } else {
+                    println!("✓ Transfer cancelled: {}", r.transfer_name);
+                    println!(
+                        "  Deleted {} shards ({} had already expired or been deleted)",
+                        r.shards_deleted, r.shards_already_gone
+                    );
+                    if r.shards_failed > 0 {
+                        println!(
+                            "  {} shards could not be deleted (node unreachable); they expire within 24 hours",
+                            r.shards_failed
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                if cli.json {
+                    let json = serde_json::json!({ "status": "error", "error": e });
+                    println!("{}", serde_json::to_string_pretty(&json).unwrap());
+                } else {
+                    eprintln!("✗ Cancel failed: {}", e);
+                }
+                std::process::exit(1);
+            }
+        },
     }
 }

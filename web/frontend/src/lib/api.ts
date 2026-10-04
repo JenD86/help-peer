@@ -109,6 +109,26 @@ export async function downloadSegment(
   return resp.arrayBuffer()
 }
 
+export interface CancelInfo {
+  manifestHash: string
+  ackSecret: string
+  deleteToken: string
+  shards: { hash: string; node: string }[]
+}
+
+// Withdraw a transfer: the relay drops the manifest and the shards are deleted.
+export async function cancelTransfer(
+  info: CancelInfo
+): Promise<{ shards_deleted: number; shards_already_gone: number; shards_failed: number }> {
+  const resp = await postJSON('/api/cancel', {
+    manifest_hash: info.manifestHash,
+    ack_secret: info.ackSecret,
+    delete_token: info.deleteToken,
+    shards: info.shards,
+  })
+  return resp.json()
+}
+
 export async function notifyRecipients(
   transferId: string,
   code: string,

@@ -1,6 +1,9 @@
 import { useState, useCallback } from 'react'
 import { deriveKeys, relayHash, encryptSegment, generateCode, fileHasher, newSecret, secretHash } from '../lib/crypto'
-import { uploadSegment, uploadManifest, notifyRecipients, checkAuth, type ShardInfo } from '../lib/api'
+import {
+  uploadSegment, uploadManifest, notifyRecipients, checkAuth, cancelTransfer,
+  type ShardInfo, type CancelInfo,
+} from '../lib/api'
 
 const SEGMENT_SIZE = 64 * 1024 * 1024 // 64MB
 const MAX_RETRIEVALS = 100
@@ -32,6 +35,10 @@ export default function Upload() {
   const [status, setStatus] = useState<'idle' | 'encrypting' | 'uploading' | 'notifying' | 'done' | 'error'>('idle')
   const [progress, setProgress] = useState('')
   const [result, setResult] = useState<{ code: string; transferName: string; files: number; totalBytes: number } | null>(null)
+  // What's needed to cancel the transfer just sent (kept only in this page)
+  const [cancelInfo, setCancelInfo] = useState<CancelInfo | null>(null)
+  const [cancelState, setCancelState] = useState<'idle' | 'cancelling' | 'cancelled' | 'error'>('idle')
+  const [cancelMsg, setCancelMsg] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -151,6 +158,13 @@ export default function Upload() {
       })
 
       setResult({ code, transferName: name, files: files.length, totalBytes })
+      setCancelInfo({
+        manifestHash: rHash,
+        ackSecret,
+        deleteToken,
+        shards: manifestFiles.flatMap(f => f.segments.flatMap(s => s.shards.map(sh => ({ hash: sh.hash, node: sh.node })))),
+      })
+      setCancelState('idle')
 
       // Notify recipients if provided
       if (recipientList.length > 0 && transfer_id) {
@@ -168,29 +182,65 @@ export default function Upload() {
     }
   }
 
+  const handleCancel = async () => {
+    if (!cancelInfo) return
+    if (!window.confirm('Cancel this transfer? Recipients will no longer be able to download it.')) return
+    setCancelState('cancelling')
+    try {
+      const r = await cancelTransfer(cancelInfo)
+      setCancelState('cancelled')
+      setCancelMsg(
+        r.shards_failed > 0
+          ? `Transfer cancelled. ${r.shards_failed} stored piece(s) couldn't be deleted right away and will expire within 24 hours.`
+          : 'Transfer cancelled and all stored data deleted.'
+      )
+    } catch (err: any) {
+      setCancelState('error')
+      setCancelMsg(err.message || 'Cancel failed')
+    }
+  }
+
   if (status === 'done' && result) {
     return (
       <div className="max-w-md mx-auto px-6 py-16 text-center">
         <div className="text-5xl mb-4">✅</div>
         <h1 className="text-2xl font-bold text-gray-900 mb-2">Upload Complete!</h1>
         <p className="text-gray-600 mb-6">Share this code with your recipient(s):</p>
-        <div className="bg-indigo-50 border-2 border-indigo-200 rounded-lg p-6 mb-6">
-          <code className="text-2xl font-mono font-bold text-indigo-700">{result.code}</code>
+        <div className={`border-2 rounded-lg p-6 mb-6 ${cancelState === 'cancelled' ? 'bg-gray-50 border-gray-200' : 'bg-indigo-50 border-indigo-200'}`}>
+          <code className={`text-2xl font-mono font-bold ${cancelState === 'cancelled' ? 'text-gray-400 line-through' : 'text-indigo-700'}`}>
+            {result.code}
+          </code>
         </div>
         <div className="text-sm text-gray-500 mb-4">
           {result.files} file(s) · {formatBytes(result.totalBytes)}
         </div>
-        <button
-          onClick={() => {
-            setStatus('idle')
-            setResult(null)
-            setFiles([])
-            setRecipients('')
-          }}
-          className="text-indigo-600 hover:text-indigo-700 font-medium"
-        >
-          Send more files →
-        </button>
+        {cancelMsg && (
+          <p className={`text-sm mb-4 ${cancelState === 'error' ? 'text-red-600' : 'text-gray-600'}`}>{cancelMsg}</p>
+        )}
+        <div className="flex justify-center gap-6">
+          {cancelState !== 'cancelled' && (
+            <button
+              onClick={handleCancel}
+              disabled={cancelState === 'cancelling'}
+              className="text-red-500 hover:text-red-700 font-medium disabled:opacity-50"
+            >
+              {cancelState === 'cancelling' ? 'Cancelling...' : 'Cancel transfer'}
+            </button>
+          )}
+          <button
+            onClick={() => {
+              setStatus('idle')
+              setResult(null)
+              setCancelInfo(null)
+              setCancelMsg('')
+              setFiles([])
+              setRecipients('')
+            }}
+            className="text-indigo-600 hover:text-indigo-700 font-medium"
+          >
+            Send more files →
+          </button>
+        </div>
       </div>
     )
   }
