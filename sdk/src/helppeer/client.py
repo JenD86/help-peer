@@ -22,6 +22,7 @@ from .manifest import (
     Manifest, ManifestSegment, ManifestShard,
     build_manifest, read_file_segment, safe_output_path,
 )
+from .resume import ResumeLog
 from .validator import ValidatorRegistry
 
 # (connect, read) timeouts in seconds for every request.
@@ -136,19 +137,27 @@ def receive(
         # Download encrypted manifest from relay. It stays there until we
         # confirm success below, so a failed download can be retried.
         encrypted_manifest = _download_manifest(session, config.relay_url, r_hash)
-        manifest = Manifest.from_json(crypto.decrypt_segment(k_data, encrypted_manifest))
+        manifest_json = crypto.decrypt_segment(k_data, encrypted_manifest)
+        manifest = Manifest.from_json(manifest_json)
         manifest.validate()
         total_shards = manifest.erasure_data_shards + manifest.erasure_parity_shards
 
         # Validate every path before touching the filesystem.
         file_paths = {f.path: safe_output_path(output_dir, f.path) for f in manifest.files}
 
-        # Pre-allocate files
+        # Pick up where a previous attempt at this transfer left off, if any.
         os.makedirs(output_dir, exist_ok=True)
+        log = ResumeLog(output_dir, crypto.content_hash(manifest_json))
+        if log.previously_done:
+            total = sum(len(f.segments) for f in manifest.files)
+            print(f"Resuming: {log.previously_done} of {total} segments were downloaded "
+                  "by a previous attempt", file=sys.stderr)
+
+        # Pre-allocate files (keeping the contents of any partial download)
         for f in manifest.files:
             file_path = file_paths[f.path]
             os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-            with open(file_path, "wb") as fh:
+            with open(file_path, "a+b") as fh:
                 fh.truncate(f.size)
 
         # Download and reconstruct each file
@@ -161,6 +170,16 @@ def receive(
                 total_segments = len(f.segments)
 
                 for seg_idx, segment in enumerate(f.segments):
+                    # Skip segments already on disk from a previous attempt, as
+                    # long as the data there is still exactly what was written.
+                    expected = log.completed(f.path, seg_idx)
+                    if expected is not None:
+                        on_disk = read_file_segment(file_path, seg_idx, manifest.segment_size)
+                        if len(on_disk) == segment.original_size and crypto.content_hash(on_disk) == expected:
+                            if progress:
+                                progress(f.path, seg_idx + 1, total_segments)
+                            continue
+
                     shard_data = _download_shards(
                         session, pool, segment,
                         manifest.erasure_data_shards, manifest.erasure_parity_shards,
@@ -177,6 +196,10 @@ def receive(
                     with open(file_path, "r+b") as fh:
                         fh.seek(seg_idx * manifest.segment_size)
                         fh.write(plaintext)
+                        # Make sure the data is on disk before the log says it is.
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    log.record(f.path, seg_idx, crypto.content_hash(plaintext))
 
                     if progress:
                         progress(f.path, seg_idx + 1, total_segments)
@@ -184,10 +207,14 @@ def receive(
                 # Check the reassembled file against the sender's hash, when provided
                 file_hash = _compute_file_hash(file_path)
                 if f.blake3 is not None and file_hash != f.blake3:
+                    log.remove()  # don't let a retry trust any of this attempt's segments
                     raise ValueError(
                         f"{f.path} is corrupt: BLAKE3 {file_hash} does not match sender's {f.blake3}"
                     )
                 file_hashes[f.path] = file_hash
+
+        resumed = log.previously_done
+        log.remove()
 
         # Everything verified: confirm, which uses up this recipient's retrieval.
         acknowledged = _acknowledge(session, config.relay_url, r_hash, manifest.ack_secret)
@@ -198,6 +225,7 @@ def receive(
         "total_bytes": manifest.total_bytes,
         "file_hashes": file_hashes,
         "acknowledged": acknowledged,
+        "resumed_segments": resumed,
     }
 
 

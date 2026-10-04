@@ -11,7 +11,7 @@ Think "Wormhole meets BitTorrent, but the sender can leave."
 3. The encrypted manifest is uploaded to a relay server
 4. **Sender can go offline**
 5. **Receiver** runs `helppeer receive orbit-velvet-zoom-candle-harbor-ember` — the code derives the encryption keys, fetches the manifest from the relay, downloads shards from storage nodes (checking each against its BLAKE3 hash), reconstructs, decrypts, and verifies each file against the sender's BLAKE3 hash
-6. Once everything is verified, the receiver confirms with the relay, which deletes the manifest. If the download fails partway, just run the same command again
+6. Once everything is verified, the receiver confirms with the relay, which deletes the manifest. If the download fails partway, just run the same command again: the CLI and Python SDK resume where they stopped (progress is kept in `<output>/.helppeer/` until the download completes)
 7. Shards and manifests auto-expire after 24 hours (TTL)
 
 The Rust CLI, Python SDK and web UI implement the same protocol, so a code from any one of them can be received with any other.
@@ -134,7 +134,7 @@ python -m helppeer --help                                       # also works
 ```
 
 **Web UI:**
-Open `http://localhost:8080` in your browser. Drag & drop files to send, or enter a code to receive. Files are encrypted in the browser and uploaded 64MB at a time; the backend only ever sees ciphertext, which it erasure-codes and stores. In Chromium-based browsers, received files stream straight into a folder you pick; other browsers assemble each file in memory, so use the CLI for very large transfers there. Log in with email for transfer history and to email the code to recipients (the code then passes through the server and the recipients' mail providers).
+Open `http://localhost:8080` in your browser. Drag & drop files to send, or enter a code to receive. Files are encrypted in the browser and uploaded 64MB at a time; the backend only ever sees ciphertext, which it erasure-codes and stores. In Chromium-based browsers, received files stream straight into a folder you pick; other browsers assemble each file in memory, so use the CLI for very large transfers there. A failed browser download can be retried with the same code but starts over, whereas the CLI and Python SDK resume. Log in with email for transfer history and to email the code to recipients (the code then passes through the server and the recipients' mail providers).
 
 ### Multiple Storage Nodes
 
@@ -287,6 +287,7 @@ help-peer/
 │       ├── main.rs                            # CLI entry point (--json mode)
 │       ├── crypto.rs                          # AES-GCM, HKDF, BLAKE3
 │       ├── http.rs                            # Shared HTTP client with timeouts + retries
+│       ├── resume.rs                          # Progress log for resuming downloads
 │       ├── erasure.rs                         # Reed-Solomon erasure coding
 │       ├── manifest.rs                        # Multi-file manifest builder
 │       ├── upload.rs                          # Shard upload pipeline
@@ -300,6 +301,7 @@ help-peer/
 │   │   ├── crypto.py                          # AES-GCM, HKDF, BLAKE3
 │   │   ├── erasure.py                         # Reed-Solomon erasure coding
 │   │   ├── manifest.py                        # Manifest builder & parser
+│   │   ├── resume.py                          # Progress log for resuming downloads
 │   │   ├── validator.py                       # Safetensors & pluggable validators
 │   │   ├── config.py                          # Configuration & env vars
 │   │   └── cli.py                             # CLI entry point
@@ -367,7 +369,7 @@ diff -r /tmp/test-model /tmp/received-py
 - [ ] DHT-based node discovery (Kademlia)
 - [ ] NAT traversal (UDP hole-punching)
 - [ ] QUIC transport
-- [ ] Resumable downloads (SQLite state tracking) — failed downloads can be retried, but start over from the beginning
+- [x] Resumable downloads in the CLI and Python SDK (the web UI retries from the beginning)
 - [x] Argon2id key stretching of transfer codes
 - [x] Retry-safe retrieval (manifest deleted on confirmation, not on fetch)
 - [ ] Multiple relay federation

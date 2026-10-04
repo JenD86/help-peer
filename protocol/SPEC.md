@@ -391,3 +391,26 @@ anything.
 Paths use `/` as the separator. Receivers must reject any path that is empty,
 absolute, or has a component that is empty, `.`, `..`, or contains `\`, `:`
 or NUL, and must do so before creating any files.
+
+## 8. Resuming Interrupted Downloads
+
+Because the relay keeps a manifest until the receiver confirms (1.3), a
+receiver can run again with the same code after a failure. Clients that
+support resuming keep an append-only progress log at
+`<output>/.helppeer/<manifest_id>.partial`, where `manifest_id` is the hex
+BLAKE3 of the decrypted manifest JSON:
+
+```
+{"version":1,"manifest_id":"<hex>"}
+{"file":"sub/model.safetensors","segment":0,"blake3":"<hex>"}
+{"file":"sub/model.safetensors","segment":1,"blake3":"<hex>"}
+```
+
+* The first line is a header. A log whose header doesn't match the current manifest is discarded.
+* Each further line records a segment whose plaintext was written and flushed to disk, with the BLAKE3 of that plaintext. Entries are written only after the data is synced.
+* Malformed lines (e.g. one cut short by a crash) are skipped, and a client appending to an existing log starts with a newline.
+* On resume, existing output files are not truncated. A logged segment is skipped only if the bytes on disk at its offset still hash to the logged value; otherwise it is downloaded again.
+* The log is deleted after every file passes its whole-file check, and also when a whole-file check fails, so the next attempt starts clean.
+
+The log contains no secrets. The Rust and Python clients share this format,
+so either can resume the other's partial download.

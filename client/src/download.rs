@@ -7,6 +7,7 @@ use crate::crypto;
 use crate::erasure;
 use crate::http;
 use crate::manifest::{self, Manifest, ManifestSegment};
+use crate::resume::ResumeLog;
 use crate::validator::ValidatorRegistry;
 
 /// A completed download: the manifest and each file's BLAKE3 hash.
@@ -47,7 +48,19 @@ pub async fn download_transfer(
         .map(|f| manifest::safe_output_path(output_dir, &f.path))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Pre-allocate files
+    // Pick up where a previous attempt at this transfer left off, if any.
+    let manifest_id = crypto::content_hash(&manifest_json);
+    let mut progress = ResumeLog::open(output_dir, &manifest_id)?;
+    let total_segments: usize = manifest.files.iter().map(|f| f.segments.len()).sum();
+    if progress.previously_done() > 0 {
+        eprintln!(
+            "Resuming: {} of {} segments were downloaded by a previous attempt",
+            progress.previously_done(),
+            total_segments
+        );
+    }
+
+    // Pre-allocate files (keeping the contents of any partial download)
     preallocate_files(&manifest, &file_paths)?;
 
     // Download and reconstruct each file
@@ -57,6 +70,15 @@ pub async fn download_transfer(
 
     for (file, file_path) in manifest.files.iter().zip(&file_paths) {
         for (seg_idx, segment) in file.segments.iter().enumerate() {
+            // Skip segments already on disk from a previous attempt, as long
+            // as the data there is still exactly what was written.
+            if let Some(expected) = progress.completed(&file.path, seg_idx) {
+                let on_disk = manifest::read_file_segment(file_path, seg_idx, segment_size)?;
+                if on_disk.len() == segment.original_size && crypto::content_hash(&on_disk) == expected {
+                    continue;
+                }
+            }
+
             // Download shards for this segment
             let shard_data = download_shards_for_segment(&client, segment).await?;
 
@@ -76,14 +98,17 @@ pub async fn download_transfer(
                 })?;
             }
 
-            // Write to file at the correct offset
+            // Write to file at the correct offset, then record it as done
             write_segment_at_offset(file_path, seg_idx * segment_size, &plaintext)?;
+            progress.record(&file.path, seg_idx, &crypto::content_hash(&plaintext))?;
         }
 
         // Check the reassembled file against the sender's hash, when provided
         let hash = compute_file_hash(file_path)?;
         if let Some(expected) = &file.blake3 {
             if &hash != expected {
+                // Don't let a retry trust any of this attempt's segments.
+                progress.remove();
                 return Err(format!(
                     "{} is corrupt: BLAKE3 {} does not match sender's {}",
                     file.path, hash, expected
@@ -92,6 +117,8 @@ pub async fn download_transfer(
         }
         file_hashes.push((file.path.clone(), hash));
     }
+
+    progress.remove();
 
     // Everything verified: confirm, which uses up this recipient's retrieval.
     let ack = http::post(
@@ -160,12 +187,17 @@ async fn download_shards_for_segment(
 }
 
 /// Pre-allocate all files with the correct sizes (zero-filled).
+/// Existing files are not truncated, so a resumed download keeps its data.
 fn preallocate_files(manifest: &Manifest, file_paths: &[PathBuf]) -> Result<(), String> {
     for (file, file_path) in manifest.files.iter().zip(file_paths) {
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {}", e))?;
         }
-        let f = std::fs::File::create(file_path).map_err(|e| format!("create failed: {}", e))?;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(file_path)
+            .map_err(|e| format!("create failed: {}", e))?;
         f.set_len(file.size).map_err(|e| format!("set_len failed: {}", e))?;
     }
     Ok(())
@@ -182,6 +214,8 @@ fn write_segment_at_offset(path: &Path, offset: usize, data: &[u8]) -> Result<()
     file.seek(SeekFrom::Start(offset as u64))
         .map_err(|e| format!("seek failed: {}", e))?;
     file.write_all(data).map_err(|e| format!("write failed: {}", e))?;
+    // Make sure the data is on disk before the resume log says it is.
+    file.sync_data().map_err(|e| format!("sync failed: {}", e))?;
     Ok(())
 }
 

@@ -3,6 +3,7 @@ mod download;
 mod erasure;
 mod http;
 mod manifest;
+mod resume;
 mod upload;
 mod validator;
 

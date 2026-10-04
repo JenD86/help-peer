@@ -289,3 +289,45 @@ class TestSharedVectors:
             for i in missing:
                 partial[i] = None
             assert erasure.decode_segment(partial, len(data)) == data
+
+
+class TestResumeLog:
+    def test_records_survive_reopen(self, tmp_path):
+        from helppeer.resume import ResumeLog
+        log = ResumeLog(str(tmp_path), "abc")
+        assert log.previously_done == 0
+        log.record("a/b.bin", 0, "h0")
+        log.record("a/b.bin", 2, "h2")
+        log.close()
+
+        log = ResumeLog(str(tmp_path), "abc")
+        assert log.previously_done == 2
+        assert log.completed("a/b.bin", 2) == "h2"
+        assert log.completed("a/b.bin", 1) is None
+        log.remove()
+        assert not (tmp_path / ".helppeer").exists()
+
+    def test_other_manifest_starts_fresh(self, tmp_path):
+        from helppeer.resume import ResumeLog
+        log = ResumeLog(str(tmp_path), "abc")
+        log.record("f", 0, "h")
+        log.close()
+        os.rename(tmp_path / ".helppeer" / "abc.partial", tmp_path / ".helppeer" / "def.partial")
+        assert ResumeLog(str(tmp_path), "def").previously_done == 0
+
+    def test_reads_rust_format_and_skips_truncated_line(self, tmp_path):
+        from helppeer.resume import ResumeLog
+        state = tmp_path / ".helppeer"
+        state.mkdir()
+        # Exactly what the Rust client writes (serde_json, no spaces), with a
+        # final line cut short by a killed process.
+        (state / "m.partial").write_text(
+            '{"version":1,"manifest_id":"m"}\n'
+            '{"file":"f","segment":0,"blake3":"h"}\n'
+            '{"file":"f","segm'
+        )
+        log = ResumeLog(str(tmp_path), "m")
+        assert log.previously_done == 1
+        log.record("f", 1, "h1")
+        log.close()
+        assert ResumeLog(str(tmp_path), "m").previously_done == 2
