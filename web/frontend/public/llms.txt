@@ -1,6 +1,6 @@
 # Help Peer
 
-> Asynchronous, end-to-end encrypted transfer of large files (model weights, datasets, checkpoints). The sender uploads and gets a one-time code; the receiver downloads with the code later. Neither has to be online at the same time. Transfers expire 24 hours after sending.
+> Asynchronous, end-to-end encrypted transfer of large files — any file type except images, video and audio (blocked to reduce abuse risk). The sender uploads and gets a one-time code; the receiver downloads with the code later. Neither has to be online at the same time. Transfers expire 24 hours after sending.
 
 Use the command-line client (`helppeer`) or the Python SDK. Both are non-interactive and have identical JSON output. Full reference: https://github.com/JenD86/help-peer#for-ai-agents
 
@@ -39,7 +39,7 @@ Use the command-line client (`helppeer`) or the Python SDK. Both are non-interac
 
 ```python
 import helppeer
-info = helppeer.send("./model-dir", name="run-42", message="LoRA, tokenizer v3", to=["alice"], return_details=True)
+info = helppeer.send("./my-files", name="run-42", message="checkpoint from step 12k", to=["alice"], return_details=True)
 helppeer.info(info["code"])                                         # preview: name, message, files
 result = helppeer.receive(info["code"], output_dir="./model-dir")   # result["message"], result["file_list"] = [{path, size, blake3}]
 helppeer.cancel(info["code"])

@@ -7,6 +7,28 @@ use crate::crypto;
 /// `ack_secret` and `delete_token`.
 pub const MANIFEST_VERSION: u32 = 2;
 
+/// File extensions blocked to reduce abuse risk (media sharing).
+/// Not a security boundary — just a deterrent.
+const BLOCKED_MEDIA_EXTENSIONS: &[&str] = &[
+    // Images
+    "jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "tiff", "tif",
+    "ico", "heic", "heif", "avif", "raw", "cr2", "nef", "arw", "psd",
+    // Video
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg",
+    "mpeg", "3gp", "ts", "vob", "ogv",
+    // Audio
+    "mp3", "wav", "flac", "aac", "ogg", "oga", "wma", "m4a", "alac",
+    "aiff", "aif", "opus", "ac3", "amr", "au",
+];
+
+fn is_blocked_media(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    BLOCKED_MEDIA_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u32,
@@ -75,6 +97,12 @@ impl Manifest {
                 .ok_or_else(|| format!("invalid file path: {}", path.display()))?
                 .to_string_lossy()
                 .to_string();
+            if is_blocked_media(&name) {
+                return Err(format!(
+                    "media files (images, video, audio) are not allowed: {}",
+                    name
+                ));
+            }
             files.push(new_file_entry(name, metadata.len()));
             match path.parent() {
                 Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -243,6 +271,14 @@ fn crawl_dir(root: &Path, current: &Path, files: &mut Vec<ManifestFile>) -> Resu
             .collect::<Vec<_>>()
             .join("/");
 
+        if is_blocked_media(&rel_path) {
+            eprintln!(
+                "warning: skipping media file {} (images, video and audio are not allowed)",
+                path.display()
+            );
+            continue;
+        }
+
         files.push(new_file_entry(rel_path, metadata.len()));
     }
 
@@ -326,6 +362,34 @@ mod tests {
         assert_eq!(manifest.total_bytes, 9);
         assert_eq!(manifest.files[0].segments.len(), 1);
         assert_eq!(manifest.files[0].segments[0].original_size, 2);
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_blocked_media_single_file() {
+        let tmp = std::env::temp_dir().join("helppeer_test_blocked");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("photo.jpg"), b"img").unwrap();
+
+        let err = Manifest::build(&tmp.join("photo.jpg"), "t").unwrap_err();
+        assert!(err.contains("media files"));
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_blocked_media_in_dir_is_skipped() {
+        let tmp = std::env::temp_dir().join("helppeer_test_blocked_dir");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("model.safetensors"), b"weights").unwrap();
+        fs::write(tmp.join("song.mp3"), b"audio").unwrap();
+
+        let (manifest, _) = Manifest::build(&tmp, "t").unwrap();
+        let paths: Vec<_> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["model.safetensors"]);
 
         fs::remove_dir_all(&tmp).unwrap();
     }

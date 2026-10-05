@@ -20,6 +20,25 @@ TAG_SIZE = 16
 # Largest segment size a receiver will accept, to bound memory use.
 MAX_SEGMENT_SIZE = 256 * 1024 * 1024
 
+# File extensions blocked to reduce abuse risk (media sharing).
+# Not a security boundary — just a deterrent.
+BLOCKED_MEDIA_EXTENSIONS = {
+    # Images
+    "jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "tiff", "tif",
+    "ico", "heic", "heif", "avif", "raw", "cr2", "nef", "arw", "psd",
+    # Video
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg",
+    "mpeg", "3gp", "ts", "vob", "ogv",
+    # Audio
+    "mp3", "wav", "flac", "aac", "ogg", "oga", "wma", "m4a", "alac",
+    "aiff", "aif", "opus", "ac3", "amr", "au",
+}
+
+def _is_blocked_media(path: str) -> bool:
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return ext in BLOCKED_MEDIA_EXTENSIONS
+
+
 _HEX_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -203,8 +222,11 @@ def build_manifest(path: str, transfer_name: str, segment_size: int) -> Tuple[Ma
 
     if os.path.isfile(path):
         base_dir = os.path.dirname(path) or "."
+        basename = os.path.basename(path)
+        if _is_blocked_media(basename):
+            raise ValueError(f"media files (images, video, audio) are not allowed: {basename}")
         manifest.files.append(
-            _new_file_entry(os.path.basename(path), os.path.getsize(path), segment_size)
+            _new_file_entry(basename, os.path.getsize(path), segment_size)
         )
     elif os.path.isdir(path):
         base_dir = path
@@ -220,6 +242,10 @@ def build_manifest(path: str, transfer_name: str, segment_size: int) -> Tuple[Ma
                 filepath = os.path.join(root, filename)
                 if not os.path.isfile(filepath):
                     print(f"warning: skipping {filepath} (broken symlink or special file)",
+                          file=sys.stderr)
+                    continue
+                if _is_blocked_media(filename):
+                    print(f"warning: skipping media file {filepath} (images, video and audio are not allowed)",
                           file=sys.stderr)
                     continue
                 # Manifest paths always use '/' so receivers on any OS parse them the same way.

@@ -18,8 +18,8 @@ export default function Landing() {
           Hand off large files, <span className="text-indigo-600">end-to-end encrypted</span>
         </h1>
         <p className="text-xl text-gray-600 mb-8">
-          Send model weights, datasets and checkpoints to a person or an agent with a one-time code. The sender can go
-          offline straight away; the files wait, encrypted, for up to 24 hours.
+          Send large files to a person or an agent with a one-time code — model weights, datasets, tarballs, anything.
+          The sender can go offline straight away; the files wait, end-to-end encrypted, for up to 24 hours.
         </p>
         <div className="flex gap-4 justify-center">
           <Link
@@ -72,7 +72,7 @@ helppeer login --server ${typeof window !== 'undefined' ? window.location.origin
 
 helppeer --json send ./model-dir --name "my-finetune"     # → {"status": "ok", "code": "...", ...}
 helppeer --json receive <code> --output ./model-dir      # → files with verified BLAKE3 hashes
-helppeer --json send ./model-dir --to alice              # deliver to a username's inbox`}</Code>
+helppeer --json send ./dataset-dir --to alice            # deliver to a username's inbox`}</Code>
         <p className="text-sm text-gray-500 mt-3">
           Create an API token on your <Link to="/account" className="text-indigo-600">Account</Link> page. Agents can
           read a compact guide at <a href="/llms.txt" className="text-indigo-600">/llms.txt</a>; the full output

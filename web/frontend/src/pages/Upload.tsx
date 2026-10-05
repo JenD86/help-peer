@@ -9,6 +9,22 @@ const SEGMENT_SIZE = 64 * 1024 * 1024 // 64MB
 const MAX_RETRIEVALS = 100
 const MAX_MESSAGE_CHARS = 2000
 
+const BLOCKED_MEDIA_EXTENSIONS = [
+  'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'tiff', 'tif',
+  'ico', 'heic', 'heif', 'avif', 'raw', 'cr2', 'nef', 'arw', 'psd',
+  'mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm4v', 'mpg',
+  'mpeg', '3gp', 'ts', 'vob', 'ogv',
+  'mp3', 'wav', 'flac', 'aac', 'ogg', 'oga', 'wma', 'm4a', 'alac',
+  'aiff', 'aif', 'opus', 'ac3', 'amr', 'au',
+]
+const BLOCKED_MEDIA_TYPES = /^(image|video|audio)\//
+
+function isBlockedMedia(file: File): boolean {
+  if (BLOCKED_MEDIA_TYPES.test(file.type)) return true
+  const ext = file.name.includes('.') ? file.name.split('.').pop()!.toLowerCase() : ''
+  return BLOCKED_MEDIA_EXTENSIONS.includes(ext)
+}
+
 interface ManifestSegment {
   id: string
   original_size: number
@@ -70,21 +86,36 @@ export default function Upload() {
   const [cancelState, setCancelState] = useState<'idle' | 'cancelling' | 'cancelled' | 'error'>('idle')
   const [cancelMsg, setCancelMsg] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
+  const [mediaWarning, setMediaWarning] = useState('')
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     const dropped = Array.from(e.dataTransfer.files)
-    setFiles(prev => [...prev, ...dropped])
-    if (!transferName && dropped.length > 0) {
-      setTransferName(dropped[0].name)
+    const allowed = dropped.filter(f => !isBlockedMedia(f))
+    const rejected = dropped.filter(f => isBlockedMedia(f))
+    if (rejected.length > 0) {
+      setMediaWarning(`Rejected ${rejected.length} media file(s): ${rejected.map(f => f.name).join(', ')}. Images, video and audio are not allowed.`)
+    } else {
+      setMediaWarning('')
+    }
+    setFiles(prev => [...prev, ...allowed])
+    if (!transferName && allowed.length > 0) {
+      setTransferName(allowed[0].name)
     }
   }, [transferName])
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(e.target.files || [])
-    setFiles(prev => [...prev, ...selected])
-    if (!transferName && selected.length > 0) {
-      setTransferName(selected[0].name)
+    const allowed = selected.filter(f => !isBlockedMedia(f))
+    const rejected = selected.filter(f => isBlockedMedia(f))
+    if (rejected.length > 0) {
+      setMediaWarning(`Rejected ${rejected.length} media file(s): ${rejected.map(f => f.name).join(', ')}. Images, video and audio are not allowed.`)
+    } else {
+      setMediaWarning('')
+    }
+    setFiles(prev => [...prev, ...allowed])
+    if (!transferName && allowed.length > 0) {
+      setTransferName(allowed[0].name)
     }
   }
 
@@ -301,6 +332,7 @@ export default function Upload() {
       >
         <div className="text-4xl mb-2">📁</div>
         <p className="text-gray-600">Drag & drop files here, or click to select</p>
+        <p className="text-xs text-gray-400 mt-1">Images, video and audio files are not accepted</p>
         <input
           id="file-input"
           type="file"
@@ -309,6 +341,12 @@ export default function Upload() {
           className="hidden"
         />
       </div>
+
+      {mediaWarning && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800 mb-4">
+          {mediaWarning}
+        </div>
+      )}
 
       {/* File list */}
       {files.length > 0 && (

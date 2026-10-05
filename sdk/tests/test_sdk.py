@@ -112,6 +112,20 @@ class TestManifest:
         assert [f.path for f in m.files] == ["model.bin"]
         assert m.total_bytes == 3
 
+    def test_blocked_media_single_file(self, tmp_path):
+        (tmp_path / "photo.jpg").write_bytes(b"img")
+
+        with pytest.raises(ValueError, match="media files"):
+            manifest.build_manifest(str(tmp_path / "photo.jpg"), "t", 67108864)
+
+    def test_blocked_media_in_dir_is_skipped(self, tmp_path):
+        (tmp_path / "model.safetensors").write_bytes(b"weights")
+        (tmp_path / "song.mp3").write_bytes(b"audio")
+        (tmp_path / "clip.mp4").write_bytes(b"video")
+
+        m, _ = manifest.build_manifest(str(tmp_path), "t", 67108864)
+        assert [f.path for f in m.files] == ["model.safetensors"]
+
     def test_skips_symlinked_dirs(self, tmp_path):
         (tmp_path / "real").mkdir()
         (tmp_path / "real" / "w.bin").write_bytes(b"x")

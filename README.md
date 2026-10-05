@@ -1,8 +1,16 @@
 # Help Peer
 
-A free, decentralized system for asynchronously sharing large file dumps — mainly AI model weights — without requiring the sender to stay online.
+A free, decentralized system for asynchronously sending large files without requiring the sender to stay online. Built for AI agents and people who move model weights, datasets, checkpoints, or anything else too big for email and too ephemeral for a registry.
 
 Think "Wormhole meets BitTorrent, but the sender can leave."
+
+## What It's For
+
+You run `helppeer send ./my-files/`, get a code, and share it. The recipient downloads whenever they're ready — you don't have to be online. Data is end-to-end encrypted, erasure-coded across volunteer storage nodes, and auto-expires in 24 hours.
+
+**It's a transport, not a registry.** Use it when you want to get files to someone specific, privately, and then have them disappear — not when you want to publish for the world to discover. Think magic-wormhole or WeTransfer, but decentralized, encrypted, resumable, and designed to be driven by scripts and AI agents as much as by people.
+
+Any file type works — model weights, datasets, tarballs, source trees, anything. (Image, video and audio files are blocked to reduce abuse risk.)
 
 It's built to be driven by **AI agents** as much as by people: every command is non-interactive, has a `--json` mode with a stable output shape, and is safe to retry where it matters. Agents should start with [For AI Agents](#for-ai-agents). Want to help? [Run a storage node](#storage-nodes).
 
@@ -87,7 +95,7 @@ Every Help Peer website also serves this guide in compact form at `/llms.txt`.
 
 ## How It Works
 
-1. **Sender** runs `helppeer send ./my-model/` and gets a code like `orbit-velvet-zoom-candle-harbor-ember`
+1. **Sender** runs `helppeer send ./my-files/` and gets a code like `orbit-velvet-zoom-candle-harbor-ember`
 2. The files are encrypted (AES-256-GCM), split into 64MB segments, erasure-coded (8+4 Reed-Solomon), and the 12 shards per segment are uploaded to volunteer storage nodes
 3. The encrypted manifest is uploaded to a relay server
 4. **Sender can go offline**
