@@ -46,7 +46,7 @@ jobs:
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:7000/health >/dev/null \
               && curl -fsS http://127.0.0.1:7001/health >/dev/null \
-              && curl -fsS http://127.0.0.1:8123/api/health >/dev/null; then
+              && curl -fsS http://127.0.0.1:8080/api/health >/dev/null; then
               echo "Deployed $(git rev-parse --short HEAD), all services healthy"
               exit 0
             fi
