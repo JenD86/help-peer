@@ -182,6 +182,18 @@ func (e *testEnv) post(t *testing.T, path string, body interface{}, cookie strin
 	return resp
 }
 
+// sessionForEmail creates a user (if needed) and returns a session token.
+func (e *testEnv) sessionForEmail(email string) string {
+	u := e.s.db.GetOrCreateUserByEmail(email)
+	return e.s.db.CreateSession(u.ID)
+}
+
+// userIDForEmail returns the user ID for an email, creating the user if needed.
+func (e *testEnv) userIDForEmail(email string) string {
+	u := e.s.db.GetOrCreateUserByEmail(email)
+	return u.ID
+}
+
 func decode(t *testing.T, resp *http.Response, v interface{}) {
 	t.Helper()
 	defer resp.Body.Close()
@@ -213,7 +225,7 @@ func TestVerifyMagicLinkDoesNotDeadlock(t *testing.T) {
 	}
 
 	// The DB must still be usable afterwards.
-	if _, ok := e.s.db.GetSession(e.s.db.CreateSession("a@example.com")); !ok {
+	if _, ok := e.s.db.GetSession(e.sessionForEmail("a@example.com")); !ok {
 		t.Fatal("session not found")
 	}
 }
@@ -428,8 +440,8 @@ func TestManifestUploadHistoryAndNotify(t *testing.T) {
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
 
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
 	hash := strings.Repeat("12", 32)
 
 	var up map[string]string
@@ -487,12 +499,15 @@ func TestLegacyTransfersAreRekeyed(t *testing.T) {
 		[]byte(`{"orbit-velvet-zoom":{"code":"orbit-velvet-zoom","sender_email":"a@example.com"}}`), 0600)
 	os.WriteFile(filepath.Join(dir, "sessions.json"), []byte(`{"tok":"a@example.com"}`), 0600)
 
+	os.WriteFile(filepath.Join(dir, "users.json"),
+		[]byte(`{"a@example.com":{"email":"a@example.com","created_at":"2020-01-01T00:00:00Z"}}`), 0600)
 	db, _ := NewDB(dir)
 	data, _ := os.ReadFile(filepath.Join(dir, "transfers.json"))
 	if strings.Contains(string(data), "orbit-velvet-zoom") {
 		t.Fatalf("legacy code still on disk: %s", data)
 	}
-	if got := db.GetTransfersByEmail("a@example.com"); len(got) != 1 {
+	u, _ := db.GetUserByEmail("a@example.com")
+	if got := db.GetTransfersByUserID(u.ID); len(got) != 1 {
 		t.Fatalf("legacy record lost: %v", got)
 	}
 	if _, ok := db.GetSession("tok"); ok {
@@ -502,7 +517,7 @@ func TestLegacyTransfersAreRekeyed(t *testing.T) {
 
 func TestSessionsExpire(t *testing.T) {
 	e := newTestEnv(t)
-	tok := e.s.db.CreateSession("a@example.com")
+	tok := e.sessionForEmail("a@example.com")
 	e.s.db.mu.Lock()
 	e.s.db.sessions[tok].Expires = time.Now().Add(-time.Second)
 	e.s.db.mu.Unlock()
@@ -733,9 +748,9 @@ func (e *testEnv) do(t *testing.T, method, path string, body interface{}, sessio
 
 func TestProfileAndSearch(t *testing.T) {
 	e := newTestEnv(t)
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
-	carol := e.s.db.CreateSession("carol@example.com")
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
+	carol := e.sessionForEmail("carol@example.com")
 
 	if code, _ := e.do(t, "GET", "/api/profile", nil, "", ""); code != 401 {
 		t.Fatalf("anonymous profile: %d", code)
@@ -804,10 +819,10 @@ func TestSendToUsernameUsesInbox(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
-	e.s.db.SetProfile("alice@example.com", "alice", true)
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
+	e.s.db.SetProfile(e.userIDForEmail("alice@example.com"), "alice", true)
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 	hash := strings.Repeat("ab", 32)
 
 	if code, out := sendToUsers(t, e, alice, hash, []string{"@bob", "nobody"}); code != 400 || !strings.Contains(fmt.Sprint(out["error"]), "nobody") {
@@ -862,9 +877,9 @@ func TestInboxDropsGoneTransfers(t *testing.T) {
 	e := newTestEnv(t)
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 
 	received := strings.Repeat("a1", 32)
 	cancelled := strings.Repeat("b2", 32)
@@ -890,8 +905,8 @@ func TestInboxDropsGoneTransfers(t *testing.T) {
 
 func TestInboxItemsExpire(t *testing.T) {
 	e := newTestEnv(t)
-	e.s.db.AddInboxItem(&InboxItem{ID: "x", RecipientEmail: "bob@example.com", Code: "c", ExpiresAt: time.Now().Add(-time.Second)})
-	bob := e.s.db.CreateSession("bob@example.com") // triggers cleanup
+	e.s.db.AddInboxItem(&InboxItem{ID: "x", RecipientID: e.userIDForEmail("bob@example.com"), Code: "c", ExpiresAt: time.Now().Add(-time.Second)})
+	bob := e.sessionForEmail("bob@example.com") // triggers cleanup
 	if _, inbox := e.do(t, "GET", "/api/inbox", nil, bob, ""); len(inbox["items"].([]interface{})) != 0 {
 		t.Fatal("expired item shown")
 	}
@@ -904,7 +919,7 @@ func TestAPITokens(t *testing.T) {
 	e := newTestEnv(t)
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
-	alice := e.s.db.CreateSession("alice@example.com")
+	alice := e.sessionForEmail("alice@example.com")
 
 	code, out := e.do(t, "POST", "/api/tokens", map[string]string{"name": "laptop"}, alice, "")
 	token, _ := out["token"].(string)
@@ -934,7 +949,7 @@ func TestAPITokens(t *testing.T) {
 	if code != 200 || reg["transfer_id"] == "" {
 		t.Fatalf("register: %d %v", code, reg)
 	}
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 	if code, out := e.do(t, "POST", "/api/notify", map[string]interface{}{
 		"transfer_id": reg["transfer_id"], "manifest_hash": hash,
 		"code": "orbit-velvet-zoom-candle-harbor-ember", "recipients": []string{"bob"},
@@ -964,8 +979,8 @@ func TestCancelClearsInbox(t *testing.T) {
 	e := newTestEnv(t)
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
-	alice := e.s.db.CreateSession("alice@example.com")
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	alice := e.sessionForEmail("alice@example.com")
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 	hash := strings.Repeat("ee", 32)
 	ackSecret := bytes.Repeat([]byte{4}, 32)
 	ackSum := blake3.Sum256(ackSecret)
@@ -986,9 +1001,9 @@ func TestMessageReachesInboxAndEmails(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 	hash := strings.Repeat("ab", 32)
 	e.relay.manifests[hash] = []byte("enc")
 

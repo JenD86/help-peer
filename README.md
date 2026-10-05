@@ -57,8 +57,8 @@ helppeer --json inbox                                            # transfers sen
 | `info` | `transfer_name`, `message` (string or `null`), `total_bytes`, `files` (list of `{path, size}`) |
 | `receive` | `transfer_name`, `message`, `total_bytes`, `files` (list of `{path, size, blake3}`), `acknowledged`, `resumed_segments` |
 | `cancel` | `transfer_name`, `shards_deleted`, `shards_already_gone`, `shards_failed` |
-| `inbox` | `items`: list of `{id, code, transfer_name, message, files, total_bytes, sender_username, sender_email, created_at, expires_at, manifest_hash}` |
-| `login` | `server`, `email`, `username`, `config` |
+| `inbox` | `items`: list of `{id, code, transfer_name, message, files, total_bytes, sender_username, sender_email (optional), created_at, expires_at, manifest_hash}` |
+| `login` | `server`, `email` (if linked), `username`, `config` |
 | `logout` | `was_logged_in` |
 
 **Behaviour to rely on**
@@ -232,14 +232,14 @@ python -m helppeer --help                                       # also works
 ```
 
 **Web UI:**
-Open `http://localhost:8080` in your browser. Drag & drop files to send, optionally with a message describing them, or enter a code to receive. Files are encrypted in the browser and uploaded 64MB at a time; the backend only ever sees ciphertext, which it erasure-codes and stores. In Chromium-based browsers, received files stream straight into a folder you pick; other browsers assemble each file in memory, so use the CLI for very large transfers there. A failed browser download can be retried with the same code but starts over, whereas the CLI and Python SDK resume. After sending, the "Cancel transfer" button withdraws the transfer and deletes its stored data (or use `helppeer cancel <code>` later). Log in with email for transfer history and to email the code to recipients (the code then passes through the server and the recipients' mail providers).
+Open `http://localhost:8080` in your browser. Drag & drop files to send, optionally with a message describing them, or enter a code to receive. Files are encrypted in the browser and uploaded 64MB at a time; the backend only ever sees ciphertext, which it erasure-codes and stores. In Chromium-based browsers, received files stream straight into a folder you pick; other browsers assemble each file in memory, so use the CLI for very large transfers there. A failed browser download can be retried with the same code but starts over, whereas the CLI and Python SDK resume. After sending, the "Cancel transfer" button withdraws the transfer and deletes its stored data (or use `helppeer cancel <code>` later). Sign up with just a username, or log in with email, for transfer history and to send to recipients by username or email (the code then passes through the server and the recipients' mail providers).
 
 ### Usernames, Directory and Inbox
 
-Logged-in web users can claim a **username** on the Account page so others can send to them without knowing their email:
+Web users can sign up with just a **username** (no email required) and optionally add an email later for notifications. Claim or change your username on the Account page so others can send to you without knowing your email:
 
 - **Directory:** users can choose to be listed. Logged-in users can search listed usernames (3+ characters, prefix match); unlisted users can still be sent to by exact username. Email addresses are never shown.
-- **Sending to a username:** put `@alice` (or `alice`) in the recipients field — mixed freely with email addresses. The transfer appears in Alice's **Inbox** on the site, and she gets an email saying something is waiting (without the code). Email-address recipients get the code by email as before.
+- **Sending to a username:** put `@alice` (or `alice`) in the recipients field — mixed freely with email addresses. The transfer appears in Alice's **Inbox** on the site, and she gets an email saying something is waiting (without the code) if she has linked an email. Email-address recipients get the code by email as before.
 - **Inbox:** shows who sent what, with a Receive button. Items disappear once received (from the web or a logged-in CLI), when the sender cancels, when dismissed, or after 24 hours.
 - **Messages:** a sender can attach a note of up to 2,000 characters. It travels in the encrypted manifest (shown by `info`, `receive` and the web Receive page before downloading) and is also stored by the server to show in inboxes, history and notification emails, so the server and recipients' mail providers can read it.
 - **Privacy note:** to deliver a code to an inbox, the server stores it until the transfer is received or expires, so the server can decrypt transfers sent to usernames (as it can for codes it emails). For the strongest privacy, share the code yourself.

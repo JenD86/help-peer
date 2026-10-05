@@ -149,16 +149,17 @@ func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, b
 
 // authMeHandler reports who is logged in (by session or API token).
 func (s *Server) authMeHandler(w http.ResponseWriter, req *http.Request) {
-	email, ok := s.getUserEmail(req)
+	userID, ok := s.getUserID(req)
 	if !ok {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"authenticated": false})
+		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
 		return
 	}
-	u, _ := s.db.GetUser(email)
+	u, _ := s.db.GetUser(userID)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"authenticated": true,
-		"email":         email,
-		"username":      u.Username,
+		"id":           u.ID,
+		"email":        u.Email,
+		"username":     u.Username,
 	})
 }
 
@@ -191,6 +192,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/auth/request", s.auth.authRequestHandler)
 	mux.HandleFunc("/api/auth/verify", s.auth.authVerifyHandler)
 	mux.HandleFunc("/api/auth/logout", s.auth.authLogoutHandler)
+	mux.HandleFunc("/api/auth/signup", s.auth.authSignupHandler)
+	mux.HandleFunc("/api/auth/link-email", s.auth.authLinkEmailHandler)
 	mux.HandleFunc("/api/auth/me", s.authMeHandler)
 	mux.HandleFunc("/api/upload/segment", s.segmentUploadHandler)
 	mux.HandleFunc("/api/upload/manifest", s.manifestUploadHandler)
@@ -294,17 +297,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// getUserEmail identifies the user from an API token (CLI/SDK, sent as
+// getUserID identifies the user from an API token (CLI/SDK, sent as
 // "Authorization: Bearer hp_...") or a browser session cookie.
-func (s *Server) getUserEmail(req *http.Request) (string, bool) {
+func (s *Server) getUserID(req *http.Request) (string, bool) {
 	if auth := req.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		return s.db.EmailForAPIToken(strings.TrimPrefix(auth, "Bearer "))
+		return s.db.UserIDForAPIToken(strings.TrimPrefix(auth, "Bearer "))
 	}
-	return s.sessionEmail(req)
+	return s.sessionUserID(req)
 }
 
-// sessionEmail identifies the user from a browser session cookie only.
-func (s *Server) sessionEmail(req *http.Request) (string, bool) {
+func (s *Server) sessionUserID(req *http.Request) (string, bool) {
 	cookie, err := req.Cookie("helppeer_session")
 	if err != nil {
 		return "", false

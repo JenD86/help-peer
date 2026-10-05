@@ -34,11 +34,19 @@ export async function requestMagicLink(email: string): Promise<{ status: string;
   return (await postJSON('/api/auth/request', { email })).json()
 }
 
-export async function verifyMagicLink(token: string): Promise<{ status: string; email: string }> {
+export async function verifyMagicLink(token: string): Promise<{ status: string }> {
   return (await postJSON('/api/auth/verify', { token })).json()
 }
 
-export async function checkAuth(): Promise<{ authenticated: boolean; email?: string; username?: string }> {
+export async function signup(username: string): Promise<{ status: string }> {
+  return (await postJSON('/api/auth/signup', { username })).json()
+}
+
+export async function linkEmail(email: string): Promise<{ status: string; message: string }> {
+  return (await postJSON('/api/auth/link-email', { email })).json()
+}
+
+export async function checkAuth(): Promise<{ authenticated: boolean; id?: string; email?: string; username?: string }> {
   return (await request('/api/auth/me')).json()
 }
 
@@ -145,6 +153,7 @@ export async function notifyRecipients(
 // --- Profile & directory ---
 
 export interface Profile {
+  id: string
   email: string
   username: string
   listed: boolean
@@ -171,7 +180,7 @@ export async function lookupUser(username: string): Promise<boolean> {
 export interface InboxItem {
   id: string
   sender_username?: string
-  sender_email: string
+  sender_email?: string
   transfer_name: string
   message?: string
   files: number

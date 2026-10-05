@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  getProfile, setProfile, listTokens, createToken, revokeToken,
+  getProfile, setProfile, listTokens, createToken, revokeToken, linkEmail,
   type Profile, type APIToken,
 } from '../lib/api'
 
@@ -13,6 +13,8 @@ export default function Account() {
   const [tokens, setTokens] = useState<APIToken[]>([])
   const [tokenName, setTokenName] = useState('')
   const [newToken, setNewToken] = useState('')
+  const [linkEmailAddr, setLinkEmailAddr] = useState('')
+  const [emailMsg, setEmailMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -55,6 +57,17 @@ export default function Account() {
     setTokens(prev => prev.filter(t => t.id !== id))
   }
 
+  const handleLinkEmail = async (e: React.FormEvent) => {
+    e.preventDefault()
+    try {
+      const resp = await linkEmail(linkEmailAddr.trim())
+      setEmailMsg({ ok: true, text: resp.message || 'Check your email to confirm.' })
+      setLinkEmailAddr('')
+    } catch (err: any) {
+      setEmailMsg({ ok: false, text: err.message || 'Could not link email' })
+    }
+  }
+
   if (error && !profile) {
     return (
       <div className="max-w-2xl mx-auto px-6 py-16 text-center text-gray-600">
@@ -74,14 +87,47 @@ export default function Account() {
     <div className="max-w-2xl mx-auto px-6 py-8 space-y-10">
       <div>
         <h1 className="text-3xl font-bold text-gray-900 mb-1">Account</h1>
-        <p className="text-sm text-gray-500">Logged in as {profile.email}</p>
+        <p className="text-sm text-gray-500">
+          Logged in as {profile.email || <span className="italic">no email linked</span>}
+        </p>
       </div>
+
+      <section>
+        <h2 className="text-lg font-semibold text-gray-900 mb-1">Email</h2>
+        {profile.email ? (
+          <p className="text-sm text-gray-600">
+            Your email is <span className="font-medium">{profile.email}</span>. You'll receive notifications when someone sends you files by username.
+          </p>
+        ) : (
+          <>
+            <p className="text-sm text-gray-500 mb-4">
+              Add an email to get notified when someone sends you files by username. We'll send you a verification link.
+            </p>
+            <form onSubmit={handleLinkEmail} className="space-y-3">
+              <input
+                type="email"
+                placeholder="you@example.com"
+                value={linkEmailAddr}
+                onChange={e => setLinkEmailAddr(e.target.value)}
+                required
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              />
+              <button type="submit" className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-indigo-700">
+                Link Email
+              </button>
+              {emailMsg && (
+                <p className={`text-sm ${emailMsg.ok ? 'text-green-700' : 'text-red-600'}`}>{emailMsg.text}</p>
+              )}
+            </form>
+          </>
+        )}
+      </section>
 
       <section>
         <h2 className="text-lg font-semibold text-gray-900 mb-1">Username</h2>
         <p className="text-sm text-gray-500 mb-4">
-          Others can send files to your username instead of your email. Transfers go to your{' '}
-          <Link to="/inbox" className="text-indigo-600">inbox</Link> and you get an email letting you know. Your email
+          Others can send files to your username. Transfers go to your{' '}
+          <Link to="/inbox" className="text-indigo-600">inbox</Link> and you get an email letting you know if you've linked one. Your email
           address is never shown to anyone.
         </p>
         <form onSubmit={saveProfile} className="space-y-3">

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,17 +24,19 @@ const (
 type DB struct {
 	mu        sync.Mutex
 	dataDir   string
-	users     map[string]*User
-	sessions  map[string]*Session // session token -> session
+	users     map[string]*User           // user ID -> user
+	sessions  map[string]*Session        // session token -> session
 	links     map[string]*MagicLink
 	transfers map[string]*TransferRecord // record ID -> record
 	inbox     map[string]*InboxItem      // item ID -> item
 	tokens    map[string]*APIToken       // SHA-256 of token -> token
-	usernames map[string]string          // username -> email (derived from users)
+	usernames map[string]string          // username -> user ID
+	emails    map[string]string          // email -> user ID (for magic-link login)
 }
 
 type User struct {
-	Email     string    `json:"email"`
+	ID        string    `json:"id"`
+	Email     string    `json:"email,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// Username lets others send to this user without knowing their email.
 	Username string `json:"username,omitempty"`
@@ -43,13 +46,15 @@ type User struct {
 }
 
 type Session struct {
-	Email   string    `json:"email"`
+	UserID  string    `json:"user_id"`
+	Email   string    `json:"email,omitempty"` // legacy, migrated on load
 	Expires time.Time `json:"expires"`
 }
 
 type MagicLink struct {
 	Token   string    `json:"token"`
 	Email   string    `json:"email"`
+	UserID  string    `json:"user_id,omitempty"` // if set, link email to this user instead of creating new
 	Expires time.Time `json:"expires"`
 }
 
@@ -58,7 +63,8 @@ type MagicLink struct {
 // keep it.
 type TransferRecord struct {
 	ID           string    `json:"id"`
-	SenderEmail  string    `json:"sender_email"`
+	SenderID     string    `json:"sender_id"`
+	SenderEmail  string    `json:"sender_email,omitempty"` // legacy, migrated on load
 	Recipients   []string  `json:"recipients"`
 	TransferName string    `json:"transfer_name"`
 	Message      string    `json:"message,omitempty"` // sender's note, shown to recipients
@@ -77,6 +83,7 @@ func NewDB(dataDir string) (*DB, error) {
 		inbox:     make(map[string]*InboxItem),
 		tokens:    make(map[string]*APIToken),
 		usernames: make(map[string]string),
+		emails:    make(map[string]string),
 	}
 	db.load()
 	return db, nil
@@ -104,16 +111,101 @@ func (d *DB) load() {
 	loadJSON("inbox.json", &d.inbox)
 	loadJSON("tokens.json", &d.tokens)
 
-	for email, u := range d.users {
-		if u != nil && u.Username != "" {
-			d.usernames[u.Username] = email
+	// --- Migrate old email-keyed data to ID-keyed ---
+	migrated := false
+
+	// Users: old format keyed by email with no ID field.
+	oldUsers := map[string]*User{}
+	for key, u := range d.users {
+		if u == nil {
+			continue
+		}
+		if u.ID == "" {
+			u.ID = generateToken(16)
+			oldUsers[key] = u
+			migrated = true
+		}
+		if u.Email != "" {
+			d.emails[strings.ToLower(u.Email)] = u.ID
+		}
+		if u.Username != "" {
+			d.usernames[u.Username] = u.ID
+		}
+	}
+	// Re-key users map by ID.
+	if len(oldUsers) > 0 {
+		for oldKey, u := range oldUsers {
+			delete(d.users, oldKey)
+			d.users[u.ID] = u
+		}
+	}
+
+	// Sessions: old format has Email but no UserID.
+	for _, s := range d.sessions {
+		if s == nil {
+			continue
+		}
+		if s.UserID == "" && s.Email != "" {
+			if uid, ok := d.emails[strings.ToLower(s.Email)]; ok {
+				s.UserID = uid
+				s.Email = ""
+				migrated = true
+			}
+		}
+	}
+
+	// Transfers: old format has SenderEmail but no SenderID.
+	for _, t := range d.transfers {
+		if t == nil {
+			continue
+		}
+		if t.SenderID == "" && t.SenderEmail != "" {
+			if uid, ok := d.emails[strings.ToLower(t.SenderEmail)]; ok {
+				t.SenderID = uid
+				t.SenderEmail = ""
+				migrated = true
+			}
+		}
+	}
+
+	// Inbox: old format has RecipientEmail/SenderEmail but no IDs.
+	for _, item := range d.inbox {
+		if item == nil {
+			continue
+		}
+		if item.RecipientID == "" && item.RecipientEmail != "" {
+			if uid, ok := d.emails[strings.ToLower(item.RecipientEmail)]; ok {
+				item.RecipientID = uid
+				item.RecipientEmail = ""
+				migrated = true
+			}
+		}
+		if item.SenderID == "" && item.SenderEmail != "" {
+			if uid, ok := d.emails[strings.ToLower(item.SenderEmail)]; ok {
+				item.SenderID = uid
+				item.SenderEmail = ""
+				migrated = true
+			}
+		}
+	}
+
+	// API tokens: old format has Email but no UserID.
+	for _, tok := range d.tokens {
+		if tok == nil {
+			continue
+		}
+		if tok.UserID == "" && tok.Email != "" {
+			if uid, ok := d.emails[strings.ToLower(tok.Email)]; ok {
+				tok.UserID = uid
+				tok.Email = ""
+				migrated = true
+			}
 		}
 	}
 
 	// Older versions keyed transfer records by their transfer code, which
 	// let anyone with the data directory decrypt those transfers. Re-key
 	// them by random ID so the codes are dropped on the next save.
-	migrated := false
 	for key, t := range d.transfers {
 		if t.ID == "" {
 			delete(d.transfers, key)
@@ -186,25 +278,77 @@ func (d *DB) removeExpiredLocked() {
 	}
 }
 
-func (d *DB) GetOrCreateUser(email string) *User {
+func (d *DB) GetOrCreateUserByEmail(email string) *User {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.getOrCreateUserLocked(email)
+	return d.getOrCreateUserByEmailLocked(email)
 }
 
-// getOrCreateUserLocked requires d.mu to be held. sync.Mutex is not
-// reentrant, so callers that already hold the lock must use this.
-func (d *DB) getOrCreateUserLocked(email string) *User {
-	if u, ok := d.users[email]; ok {
-		return u
+// getOrCreateUserByEmailLocked requires d.mu to be held.
+func (d *DB) getOrCreateUserByEmailLocked(email string) *User {
+	email = strings.ToLower(email)
+	if uid, ok := d.emails[email]; ok {
+		return d.users[uid]
 	}
 	u := &User{
+		ID:        generateToken(16),
 		Email:     email,
 		CreatedAt: time.Now(),
 	}
-	d.users[email] = u
+	d.users[u.ID] = u
+	d.emails[email] = u.ID
 	d.save()
 	return u
+}
+
+// CreateUser creates a new user with no email (just an ID).
+func (d *DB) CreateUser() *User {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	u := &User{
+		ID:        generateToken(16),
+		CreatedAt: time.Now(),
+	}
+	d.users[u.ID] = u
+	d.save()
+	return u
+}
+
+// GetUserByEmail looks up a user by their email address.
+func (d *DB) GetUserByEmail(email string) (User, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	uid, ok := d.emails[strings.ToLower(email)]
+	if !ok {
+		return User{}, false
+	}
+	u, ok := d.users[uid]
+	if !ok {
+		return User{}, false
+	}
+	return *u, true
+}
+
+// LinkEmail associates an email address with an existing user account.
+func (d *DB) LinkEmail(userID, email string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	email = strings.ToLower(email)
+	if existingUID, ok := d.emails[email]; ok && existingUID != userID {
+		return fmt.Errorf("email already linked to another account")
+	}
+	u, ok := d.users[userID]
+	if !ok {
+		return fmt.Errorf("user not found")
+	}
+	// Remove old email mapping if any.
+	if u.Email != "" {
+		delete(d.emails, u.Email)
+	}
+	u.Email = email
+	d.emails[email] = userID
+	d.save()
+	return nil
 }
 
 func (d *DB) CreateMagicLink(email string) (*MagicLink, error) {
@@ -215,6 +359,24 @@ func (d *DB) CreateMagicLink(email string) (*MagicLink, error) {
 	link := &MagicLink{
 		Token:   generateToken(32),
 		Email:   email,
+		Expires: time.Now().Add(magicLinkTTL),
+	}
+	d.links[link.Token] = link
+	d.save()
+	return link, nil
+}
+
+// CreateMagicLinkForUser creates a magic link that, when verified, links
+// the email to the given user ID instead of creating a new user.
+func (d *DB) CreateMagicLinkForUser(email, userID string) (*MagicLink, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.removeExpiredLocked()
+	link := &MagicLink{
+		Token:   generateToken(32),
+		Email:   email,
+		UserID:  userID,
 		Expires: time.Now().Add(magicLinkTTL),
 	}
 	d.links[link.Token] = link
@@ -235,18 +397,36 @@ func (d *DB) VerifyMagicLink(token string) (string, error) {
 		d.save()
 		return "", fmt.Errorf("token expired")
 	}
-	d.getOrCreateUserLocked(link.Email)
+	var userID string
+	if link.UserID != "" {
+		// Link email to an existing user account.
+		u, ok := d.users[link.UserID]
+		if !ok {
+			d.save()
+			return "", fmt.Errorf("user not found")
+		}
+		email := strings.ToLower(link.Email)
+		if u.Email != "" {
+			delete(d.emails, u.Email)
+		}
+		u.Email = email
+		d.emails[email] = u.ID
+		userID = u.ID
+	} else {
+		u := d.getOrCreateUserByEmailLocked(link.Email)
+		userID = u.ID
+	}
 	d.save()
-	return link.Email, nil
+	return userID, nil
 }
 
-func (d *DB) CreateSession(email string) string {
+func (d *DB) CreateSession(userID string) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	d.removeExpiredLocked()
 	token := generateToken(32)
-	d.sessions[token] = &Session{Email: email, Expires: time.Now().Add(sessionTTL)}
+	d.sessions[token] = &Session{UserID: userID, Expires: time.Now().Add(sessionTTL)}
 	d.save()
 	return token
 }
@@ -259,7 +439,7 @@ func (d *DB) GetSession(token string) (string, bool) {
 	if !ok || time.Now().After(s.Expires) {
 		return "", false
 	}
-	return s.Email, true
+	return s.UserID, true
 }
 
 func (d *DB) DeleteSession(token string) {
@@ -278,11 +458,11 @@ func (d *DB) SaveTransfer(record *TransferRecord) {
 
 // SetRecipients records who was notified about a transfer. It only succeeds
 // for the transfer's own sender.
-func (d *DB) SetRecipients(id, senderEmail string, recipients []string) bool {
+func (d *DB) SetRecipients(id, senderID string, recipients []string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	t, ok := d.transfers[id]
-	if !ok || t.SenderEmail != senderEmail {
+	if !ok || t.SenderID != senderID {
 		return false
 	}
 	t.Recipients = recipients
@@ -300,14 +480,14 @@ func (d *DB) GetTransfer(id string) (TransferRecord, bool) {
 	return *t, true
 }
 
-// GetTransfersByEmail returns the sender's transfers, newest first.
-func (d *DB) GetTransfersByEmail(email string) []*TransferRecord {
+// GetTransfersByUserID returns the sender's transfers, newest first.
+func (d *DB) GetTransfersByUserID(userID string) []*TransferRecord {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	var result []*TransferRecord
 	for _, t := range d.transfers {
-		if t.SenderEmail == email {
+		if t.SenderID == userID {
 			copied := *t
 			result = append(result, &copied)
 		}
