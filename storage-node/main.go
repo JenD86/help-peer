@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -29,6 +32,13 @@ type StorageNode struct {
 	maxShardBytes int64
 	started       time.Time
 	ttlSeconds    int64
+	key           ed25519.PrivateKey
+
+	// dataDir is where shards are written (disk backend; empty for S3), so
+	// the node can check the real free space there; diskReserve is left
+	// free for the rest of the system.
+	dataDir     string
+	diskReserve int64
 
 	mu       sync.Mutex
 	reserved int64 // bytes claimed by uploads in progress
@@ -38,10 +48,13 @@ type HealthResponse struct {
 	Status        string `json:"status"`
 	CapacityBytes int64  `json:"capacity_bytes"`
 	UsedBytes     int64  `json:"used_bytes"`
-	ShardCount    int    `json:"shard_count"`
-	UptimeSeconds int64  `json:"uptime_seconds"`
-	NodeID        string `json:"node_id"`
-	Backend       string `json:"backend"`
+	// AvailableBytes is what the node can really accept right now: the
+	// smaller of its remaining capacity and the disk's actual free space.
+	AvailableBytes int64  `json:"available_bytes"`
+	ShardCount     int    `json:"shard_count"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	NodeID         string `json:"node_id"`
+	Backend        string `json:"backend"`
 }
 
 func main() {
@@ -81,6 +94,11 @@ func main() {
 	var store ShardStore
 	var err error
 
+	dataDir := os.Getenv("STORAGE_DIR")
+	if dataDir == "" {
+		dataDir = "/tmp/helppeer-storage"
+	}
+
 	switch backend {
 	case "s3":
 		log.Printf("Using S3 backend (bucket: %s)", os.Getenv("S3_BUCKET"))
@@ -91,15 +109,27 @@ func main() {
 	case "disk":
 		fallthrough
 	default:
-		dataDir := os.Getenv("STORAGE_DIR")
-		if dataDir == "" {
-			dataDir = "/tmp/helppeer-storage"
-		}
 		log.Printf("Using disk backend (dir: %s)", dataDir)
 		store, err = NewDiskStore(dataDir, ttlSeconds)
 		if err != nil {
 			log.Fatalf("Failed to create disk store: %v", err)
 		}
+	}
+
+	// The node's identity key lives with its data (STORAGE_KEY_FILE to override).
+	keyFile := os.Getenv("STORAGE_KEY_FILE")
+	if keyFile == "" {
+		keyFile = filepath.Join(dataDir, "node_key")
+	}
+	key, err := loadOrCreateKey(keyFile)
+	if err != nil {
+		log.Fatalf("Failed to load node key: %v", err)
+	}
+
+	// Space to leave free on the disk for everything else (default 512 MiB).
+	var diskReserve int64 = 512 << 20
+	if v := os.Getenv("STORAGE_DISK_RESERVE"); v != "" {
+		fmt.Sscanf(v, "%d", &diskReserve)
 	}
 
 	node := &StorageNode{
@@ -108,7 +138,13 @@ func main() {
 		maxShardBytes: maxShardBytes,
 		started:       time.Now(),
 		ttlSeconds:    ttlSeconds,
+		key:           key,
+		diskReserve:   diskReserve,
 	}
+	if backend != "s3" {
+		node.dataDir = dataDir
+	}
+	log.Printf("Node ID: %s", nodeID(key.Public().(ed25519.PublicKey)))
 
 	// Start TTL cleanup goroutine
 	go node.ttlCleanup()
@@ -119,15 +155,16 @@ func main() {
 
 	srv := &http.Server{Addr: addr, Handler: node.routes()}
 
-	// Auto-register with a web backend if configured.
-	registerURL := os.Getenv("HELPEER_REGISTER_URL")
-	publicURL := os.Getenv("STORAGE_PUBLIC_URL")
-	if publicURL == "" {
-		publicURL = "http://localhost:" + port
-	}
+	// Auto-register with a web backend if configured. The backend checks
+	// that the public URL really serves this node, so it must be the
+	// address other machines use to reach it.
+	registerURL := strings.TrimRight(os.Getenv("HELPEER_REGISTER_URL"), "/")
+	publicURL := strings.TrimRight(os.Getenv("STORAGE_PUBLIC_URL"), "/")
 	if registerURL != "" {
-		registerURL = strings.TrimRight(registerURL, "/")
-		go node.autoRegister(registerURL, publicURL, capacityBytes)
+		if publicURL == "" {
+			log.Fatalf("STORAGE_PUBLIC_URL is required with HELPEER_REGISTER_URL (e.g. https://node.example.com)")
+		}
+		go node.autoRegister(registerURL, publicURL)
 	}
 
 	// Graceful shutdown so we can deregister on exit.
@@ -246,11 +283,37 @@ func (s *StorageNode) putShard(w http.ResponseWriter, req *http.Request, hash st
 func (s *StorageNode) reserve(n int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.store.UsedBytes()+s.reserved+n > s.capacityBytes {
+	if n > s.availableLocked() {
 		return false
 	}
 	s.reserved += n
 	return true
+}
+
+// available reports how many more bytes the node can accept.
+func (s *StorageNode) available() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.availableLocked()
+}
+
+// availableLocked is the smaller of the remaining configured capacity and
+// the disk's real free space (less a reserve), after uploads in progress.
+// The disk check matters because STORAGE_CAPACITY may be set higher than
+// the disk can actually hold. Requires s.mu.
+func (s *StorageNode) availableLocked() int64 {
+	avail := s.capacityBytes - s.store.UsedBytes() - s.reserved
+	if s.dataDir != "" {
+		if free, ok := diskFreeBytes(s.dataDir); ok {
+			if disk := free - s.diskReserve - s.reserved; disk < avail {
+				avail = disk
+			}
+		}
+	}
+	if avail < 0 {
+		return 0
+	}
+	return avail
 }
 
 func (s *StorageNode) release(n int64) {
@@ -312,13 +375,14 @@ func (s *StorageNode) healthHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	resp := HealthResponse{
-		Status:        "ok",
-		CapacityBytes: s.capacityBytes,
-		UsedBytes:     s.store.UsedBytes(),
-		ShardCount:    s.store.ShardCount(),
-		UptimeSeconds: int64(time.Since(s.started).Seconds()),
-		NodeID:        "ed25519:placeholder",
-		Backend:       backend,
+		Status:         "ok",
+		CapacityBytes:  s.capacityBytes,
+		UsedBytes:      s.store.UsedBytes(),
+		AvailableBytes: s.available(),
+		ShardCount:     s.store.ShardCount(),
+		UptimeSeconds:  int64(time.Since(s.started).Seconds()),
+		NodeID:         nodeID(s.key.Public().(ed25519.PublicKey)),
+		Backend:        backend,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -340,25 +404,58 @@ func (s *StorageNode) ttlCleanup() {
 	}
 }
 
-// autoRegister periodically POSTs to the web backend so it knows this node
-// is alive and reachable at publicURL.
-func (s *StorageNode) autoRegister(registerURL, publicURL string, capacity int64) {
-	body := fmt.Sprintf(`{"url":%q,"capacity_bytes":%d}`, publicURL, capacity)
+// nodeRequest is the signed body of a registration, heartbeat or
+// deregistration (see protocol/SPEC.md §2.5).
+type nodeRequest struct {
+	Action         string `json:"action"` // "register" or "deregister"
+	NodeID         string `json:"node_id"`
+	URL            string `json:"url"`
+	CapacityBytes  int64  `json:"capacity_bytes"`
+	AvailableBytes int64  `json:"available_bytes"`
+	Timestamp      int64  `json:"timestamp"` // unix milliseconds
+}
+
+// sendSigned POSTs a node request signed with the node's key.
+func (s *StorageNode) sendSigned(url string, r nodeRequest) (int, string, error) {
+	r.NodeID = nodeID(s.key.Public().(ed25519.PublicKey))
+	r.Timestamp = time.Now().UnixMilli()
+	body, _ := json.Marshal(r)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Node-Signature", base64.RawURLEncoding.EncodeToString(ed25519.Sign(s.key, body)))
+	client := &http.Client{Timeout: 2 * time.Minute} // registration includes a storage test
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode, strings.TrimSpace(string(msg)), nil
+}
+
+// autoRegister registers with the web backend and then heartbeats every
+// two minutes, reporting how much space is free.
+func (s *StorageNode) autoRegister(registerURL, publicURL string) {
 	register := func() {
-		resp, err := http.Post(registerURL+"/api/node/register", "application/json", strings.NewReader(body))
-		if err != nil {
+		code, msg, err := s.sendSigned(registerURL+"/api/node/register", nodeRequest{
+			Action:         "register",
+			URL:            publicURL,
+			CapacityBytes:  s.capacityBytes,
+			AvailableBytes: s.available(),
+		})
+		switch {
+		case err != nil:
 			log.Printf("Node registration failed: %v", err)
-			return
+		case code != http.StatusOK:
+			log.Printf("Node registration returned %d: %s", code, msg)
 		}
-		resp.Body.Close()
-		if resp.StatusCode != 200 {
-			log.Printf("Node registration returned %d", resp.StatusCode)
-			return
-		}
-		log.Printf("Registered with %s as %s", registerURL, publicURL)
 	}
 
 	register()
+	log.Printf("Registering with %s as %s", registerURL, publicURL)
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -368,11 +465,8 @@ func (s *StorageNode) autoRegister(registerURL, publicURL string, capacity int64
 
 // deregister tells the web backend this node is going away.
 func (s *StorageNode) deregister(registerURL, publicURL string) {
-	body := fmt.Sprintf(`{"url":%q}`, publicURL)
-	resp, err := http.Post(registerURL+"/api/node/deregister", "application/json", strings.NewReader(body))
-	if err != nil {
-		log.Printf("Node deregistration failed: %v", err)
-		return
+	code, msg, err := s.sendSigned(registerURL+"/api/node/deregister", nodeRequest{Action: "deregister", URL: publicURL})
+	if err != nil || code != http.StatusOK {
+		log.Printf("Node deregistration failed: %v %d %s", err, code, msg)
 	}
-	resp.Body.Close()
 }

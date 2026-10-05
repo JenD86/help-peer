@@ -241,9 +241,38 @@ X-Delete-Token: {hex delete_token}
   "used_bytes": 12000000000,
   "shard_count": 342,
   "uptime_seconds": 86400,
-  "node_id": "ed25519:base64..."
+  "available_bytes": 41687091200,
+  "node_id": "ed25519:<base64url public key>"
 }
 ```
+
+`available_bytes` is what the node can accept right now: the smaller of its remaining configured capacity and the disk's real free space (less a reserve). `node_id` identifies the node's Ed25519 key (2.5).
+
+### 2.5 Registration with a web backend
+
+Volunteer nodes register themselves with a Help Peer web backend. Each node has an Ed25519 key pair, created on first start; its ID is `ed25519:` followed by the unpadded base64url public key.
+
+**Requests.** `POST /api/node/register` (first registration and every heartbeat, every 2 minutes) and `POST /api/node/deregister` take this JSON body, signed with the node's key:
+
+```
+{"action":"register","node_id":"ed25519:...","url":"https://node.example.com",
+ "capacity_bytes":N,"available_bytes":N,"timestamp":<unix milliseconds>}
+X-Node-Signature: <unpadded base64url Ed25519 signature of the exact body bytes>
+```
+
+The backend rejects (401) a bad signature, a mismatched `action`, or a timestamp more than 5 minutes from its clock; and (409) any timestamp not newer than the node's previous request, so requests can't be replayed. Only the holder of a node's key can update or deregister it.
+
+**Verification.** On first registration, or when the URL changes, the backend:
+
+1. requires `url` to be `http(s)://host[:port]` resolving only to public addresses (private, loopback, link-local and CGNAT ranges are refused, and the check is repeated whenever it connects);
+2. fetches `url/health` and requires its `node_id` to equal the signer, proving the URL serves this node;
+3. stores a random 1 MiB test shard (10-minute TTL), reads it back and deletes it.
+
+A URL that proves to serve a new key replaces any node previously registered there.
+
+**Placement.** The backend sends a node no more than its last reported `available_bytes` (less what it has placed since), never more than 2 shards of one segment to volunteer nodes in the same network (IPv4 /24, IPv6 /48), and treats `507 Insufficient Storage` as "full until the next heartbeat", never as a fault.
+
+**Audits.** The backend spot-checks about 1 in 20 shards it places on volunteer nodes, fetching each at a random time before it expires, and counts corrupt data returned during downloads. Unreachable nodes are retried; 3 failures in a node's last 20 audits suspend it from new uploads for 24 hours. Nodes that stop heartbeating for 5 minutes are no longer used; their records (including suspensions) are kept for 7 days. Operators can ban, unban and reinstate nodes via `/api/admin/nodes` with `NODE_ADMIN_TOKEN`.
 
 ---
 

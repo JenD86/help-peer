@@ -114,6 +114,7 @@ func (s *Server) segmentDownloadHandler(w http.ResponseWriter, req *http.Request
 		index int
 		url   string
 		hash  string
+		key   string // node key, for audits
 	}
 	targets := make([]target, 0, len(body.Shards))
 	seen := make(map[int]bool, len(body.Shards))
@@ -128,7 +129,7 @@ func (s *Server) segmentDownloadHandler(w http.ResponseWriter, req *http.Request
 			writeError(w, http.StatusBadRequest, "invalid shard hash")
 			return
 		}
-		nodeURL, ok := s.nodes.InternalURL(info.Node)
+		nodeURL, key, ok := s.nodes.InternalURL(info.Node)
 		if !ok {
 			// A node that has left the list (it deregistered or stopped
 			// heartbeating) still appears in manifests for up to 24 hours.
@@ -137,7 +138,7 @@ func (s *Server) segmentDownloadHandler(w http.ResponseWriter, req *http.Request
 			unknown++
 			continue
 		}
-		targets = append(targets, target{info.Index, nodeURL + "/shard/" + info.Hash, info.Hash})
+		targets = append(targets, target{info.Index, nodeURL + "/shard/" + info.Hash, info.Hash, key})
 	}
 	if len(targets) == 0 && unknown > 0 {
 		writeError(w, http.StatusBadRequest, "unknown storage node")
@@ -157,14 +158,27 @@ func (s *Server) segmentDownloadHandler(w http.ResponseWriter, req *http.Request
 	results := make(chan result, len(targets))
 	for _, t := range targets {
 		go func(t target) {
-			data, err := downloadShard(ctx, t.url, int64(perShard))
+			data, err := downloadShard(ctx, s.nodes.ClientFor(t.key), t.url, int64(perShard))
 			if err != nil {
 				results <- result{t.index, nil}
 				return
 			}
 			sum := blake3.Sum256(data)
-			if len(data) != perShard || hex.EncodeToString(sum[:]) != t.hash {
-				log.Printf("Discarding corrupt shard %s", t.hash)
+			switch {
+			case len(data) > perShard:
+				// Longer than expected (we stop reading one byte past the
+				// size the client gave). Not counted against the node: the
+				// expected size comes from the client, which could lie.
+				data = nil
+			case hex.EncodeToString(sum[:]) != t.hash:
+				// The node returned different content under this shard's
+				// hash: it corrupted data it had accepted. (Successes
+				// aren't counted here, since a node's operator could
+				// manufacture them to hide losses; spot-checks count those.)
+				log.Printf("Discarding corrupt shard %s from %s", t.hash, t.url)
+				s.nodes.RecordAudit(t.key, false)
+				data = nil
+			case len(data) != perShard:
 				data = nil
 			}
 			results <- result{t.index, data}
@@ -274,12 +288,12 @@ func downloadManifest(relayURL, hash string) ([]byte, int, error) {
 	return data, resp.StatusCode, err
 }
 
-func downloadShard(ctx context.Context, url string, maxBytes int64) ([]byte, error) {
+func downloadShard(ctx context.Context, client *http.Client, url string, maxBytes int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
