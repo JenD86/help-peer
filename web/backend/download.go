@@ -117,6 +117,7 @@ func (s *Server) segmentDownloadHandler(w http.ResponseWriter, req *http.Request
 	}
 	targets := make([]target, 0, len(body.Shards))
 	seen := make(map[int]bool, len(body.Shards))
+	unknown := 0
 	for _, info := range body.Shards {
 		if info.Index < 0 || info.Index >= TotalShards || seen[info.Index] {
 			writeError(w, http.StatusBadRequest, "invalid shard index")
@@ -129,10 +130,18 @@ func (s *Server) segmentDownloadHandler(w http.ResponseWriter, req *http.Request
 		}
 		nodeURL, ok := s.nodes.InternalURL(info.Node)
 		if !ok {
-			writeError(w, http.StatusBadRequest, "unknown storage node")
-			return
+			// A node that has left the list (it deregistered or stopped
+			// heartbeating) still appears in manifests for up to 24 hours.
+			// Treat its shards as lost: any 8 of the 12 rebuild the segment.
+			// We never contact an address that is not in the list.
+			unknown++
+			continue
 		}
 		targets = append(targets, target{info.Index, nodeURL + "/shard/" + info.Hash, info.Hash})
+	}
+	if len(targets) == 0 && unknown > 0 {
+		writeError(w, http.StatusBadRequest, "unknown storage node")
+		return
 	}
 
 	// Fetch shards in parallel, keeping only ones whose content matches their

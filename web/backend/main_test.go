@@ -316,6 +316,43 @@ func TestSegmentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSegmentDownloadSurvivesRemovedNode(t *testing.T) {
+	e := newTestEnv(t)
+	segment := make([]byte, 100003)
+	rand.Read(segment)
+
+	var up SegmentUploadResponse
+	resp := e.post(t, "/api/upload/segment", segment, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("upload: %d", resp.StatusCode)
+	}
+	decode(t, resp, &up)
+
+	// Pretend `lost` shards live on a node that has since left the list.
+	withGone := func(lost int) SegmentDownloadRequest {
+		shards := append([]ShardInfo{}, up.Shards...)
+		for i := 0; i < lost; i++ {
+			shards[i].Node = "http://gone.example:7001"
+		}
+		return SegmentDownloadRequest{EncryptedSize: up.EncryptedSize, Shards: shards}
+	}
+
+	// Four shards on the removed node: 8 remain, which is enough.
+	resp = e.post(t, "/api/download/segment", withGone(4), "")
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !bytes.Equal(got, segment) {
+		t.Fatalf("download with 4 shards on a removed node: status %d", resp.StatusCode)
+	}
+
+	// Five lost: only 7 remain, so it fails as insufficient, not as a bad request.
+	resp = e.post(t, "/api/download/segment", withGone(5), "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502 with 5 shards lost, got %d", resp.StatusCode)
+	}
+}
+
 func TestSegmentUploadRejectsOversized(t *testing.T) {
 	e := newTestEnv(t)
 	resp := e.post(t, "/api/upload/segment", make([]byte, maxEncryptedSegment+1), "")
