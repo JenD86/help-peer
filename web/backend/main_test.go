@@ -139,7 +139,8 @@ func newTestEnv(t *testing.T, extraNodes ...StorageNode) *testEnv {
 	relaySrv := httptest.NewServer(relay)
 	t.Cleanup(relaySrv.Close)
 
-	db, err := NewDB(t.TempDir())
+	dataDir := t.TempDir()
+	db, err := NewDB(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +150,7 @@ func newTestEnv(t *testing.T, extraNodes ...StorageNode) *testEnv {
 	}
 	s := NewServer(db, relaySrv.URL,
 		append(extraNodes, StorageNode{Internal: nodeSrv.URL, Public: publicNode}),
-		&SMTPConfig{}, "https://helppeer.example.com", static)
+		&SMTPConfig{}, "https://helppeer.example.com", static, dataDir)
 	srv := httptest.NewServer(s.routes())
 	t.Cleanup(srv.Close)
 	return &testEnv{s: s, srv: srv, node: node, relay: relay}

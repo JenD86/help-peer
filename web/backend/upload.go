@@ -115,35 +115,15 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 	writeJSON(w, http.StatusOK, SegmentUploadResponse{EncryptedSize: len(data), Shards: infos})
 }
 
-// nodeHealth remembers storage nodes that recently failed, so later
-// segments skip them instead of waiting through retries every time.
-type nodeHealth struct {
-	mu        sync.Mutex
-	downUntil map[int]time.Time
-}
-
-const nodeDownFor = time.Minute
-
-func (h *nodeHealth) isDown(i int) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return time.Now().Before(h.downUntil[i])
-}
-
-func (h *nodeHealth) markDown(i int) {
-	h.mu.Lock()
-	h.downUntil[i] = time.Now().Add(nodeDownFor)
-	h.mu.Unlock()
-}
-
 // uploadShardWithFailover stores a shard on its round-robin node, falling
 // back to the next healthy node if that one fails. Nodes marked down are
 // tried last rather than never, in case they have recovered.
 func (s *Server) uploadShardWithFailover(idx int, hash string, shard []byte, deleteTokenHash string) (StorageNode, error) {
+	nodes := s.nodes.AllNodes()
 	var healthy, down []int
-	for offset := range s.storageNodes {
-		i := (idx + offset) % len(s.storageNodes)
-		if s.health.isDown(i) {
+	for offset := range nodes {
+		i := (idx + offset) % len(nodes)
+		if s.nodes.IsDown(nodes[i].Internal) {
 			down = append(down, i)
 		} else {
 			healthy = append(healthy, i)
@@ -152,7 +132,7 @@ func (s *Server) uploadShardWithFailover(idx int, hash string, shard []byte, del
 
 	lastErr := fmt.Errorf("no storage nodes configured")
 	for _, i := range append(healthy, down...) {
-		node := s.storageNodes[i]
+		node := nodes[i]
 		_, err := putWithRetry(node.Internal+"/shard/"+hash, shard, map[string]string{
 			"X-Delete-Token-Hash": deleteTokenHash,
 		})
@@ -160,7 +140,7 @@ func (s *Server) uploadShardWithFailover(idx int, hash string, shard []byte, del
 			return node, nil
 		}
 		log.Printf("Storage node %s failed: %v", node.Internal, err)
-		s.health.markDown(i)
+		s.nodes.MarkDown(node.Internal)
 		lastErr = err
 	}
 	return StorageNode{}, lastErr

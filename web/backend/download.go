@@ -127,7 +127,7 @@ func (s *Server) segmentDownloadHandler(w http.ResponseWriter, req *http.Request
 			writeError(w, http.StatusBadRequest, "invalid shard hash")
 			return
 		}
-		nodeURL, ok := s.internalNodeURL(info.Node)
+		nodeURL, ok := s.nodes.InternalURL(info.Node)
 		if !ok {
 			writeError(w, http.StatusBadRequest, "unknown storage node")
 			return

@@ -34,10 +34,9 @@ type Server struct {
 	relayURL string
 	// relayPublicURL is the relay as CLI/SDK users reach it (for /api/config).
 	relayPublicURL string
-	storageNodes   []StorageNode
+	nodes          *nodeRegistry
 	smtpConfig     *SMTPConfig
 	static         fs.FS
-	health         *nodeHealth
 
 	manifestMisses  *rateLimiter // failed manifest lookups per client
 	manifestUploads *rateLimiter // manifest uploads per client
@@ -113,10 +112,11 @@ func main() {
 		log.Fatalf("Failed to get static sub: %v", err)
 	}
 
-	server := NewServer(db, relayURL, storageNodes, smtpConfig, baseURL, staticSub)
+	server := NewServer(db, relayURL, storageNodes, smtpConfig, baseURL, staticSub, dataDir)
 	if public := strings.TrimRight(os.Getenv("RELAY_URL_PUBLIC"), "/"); public != "" {
 		server.relayPublicURL = public
 	}
+	server.nodes.StartPruner()
 	if token := os.Getenv("RELAY_TRUSTED_TOKEN"); token != "" {
 		httpClient.Transport = &relayAuthTransport{base: http.DefaultTransport, relayURL: strings.TrimRight(relayURL, "/"), token: token}
 	}
@@ -131,16 +131,15 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, server.routes()))
 }
 
-func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, baseURL string, static fs.FS) *Server {
+func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, baseURL string, static fs.FS, dataDir string) *Server {
 	return &Server{
 		db:              db,
 		auth:            NewAuth(db, smtp, baseURL),
 		relayURL:        relayURL,
 		relayPublicURL:  relayURL,
-		storageNodes:    nodes,
+		nodes:           newNodeRegistry(nodes, dataDir),
 		smtpConfig:      smtp,
 		static:          static,
-		health:          &nodeHealth{downUntil: map[int]time.Time{}},
 		manifestMisses:  newRateLimiter("manifest-misses", 30, time.Minute),
 		manifestUploads: newRateLimiter("manifest-uploads", 30, time.Minute),
 		notifyLimit:     newRateLimiter("notify", 50, time.Hour),
@@ -212,6 +211,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/notify", s.notifyHandler)
 	mux.HandleFunc("/api/history", s.historyHandler)
 	mux.HandleFunc("/api/health", s.healthHandler)
+	mux.HandleFunc("/api/node/register", s.nodeRegisterHandler)
+	mux.HandleFunc("/api/node/deregister", s.nodeDeregisterHandler)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 	})
@@ -265,19 +266,6 @@ func parseStorageNodes(internal, public string) ([]StorageNode, error) {
 	return nodes, nil
 }
 
-// internalNodeURL maps a node URL from a manifest to the URL this backend
-// should use to reach it. Only configured nodes are allowed: the URL comes
-// from the browser, and fetching arbitrary URLs would let anyone use the
-// server to reach internal services.
-func (s *Server) internalNodeURL(node string) (string, bool) {
-	node = strings.TrimRight(node, "/")
-	for _, n := range s.storageNodes {
-		if n.Public == node || n.Internal == node {
-			return n.Internal, true
-		}
-	}
-	return "", false
-}
 
 var hexHashRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 

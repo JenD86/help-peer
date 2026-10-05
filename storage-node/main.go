@@ -11,9 +11,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"lukechampine.com/blake3"
@@ -114,7 +116,35 @@ func main() {
 	addr := ":" + port
 	log.Printf("Help Peer Storage Node listening on %s (backend: %s, capacity: %d bytes, TTL: %ds)",
 		addr, backend, capacityBytes, ttlSeconds)
-	log.Fatal(http.ListenAndServe(addr, node.routes()))
+
+	srv := &http.Server{Addr: addr, Handler: node.routes()}
+
+	// Auto-register with a web backend if configured.
+	registerURL := os.Getenv("HELPEER_REGISTER_URL")
+	publicURL := os.Getenv("STORAGE_PUBLIC_URL")
+	if publicURL == "" {
+		publicURL = "http://localhost:" + port
+	}
+	if registerURL != "" {
+		registerURL = strings.TrimRight(registerURL, "/")
+		go node.autoRegister(registerURL, publicURL, capacityBytes)
+	}
+
+	// Graceful shutdown so we can deregister on exit.
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		log.Printf("Shutting down...")
+		if registerURL != "" {
+			node.deregister(registerURL, publicURL)
+		}
+		srv.Shutdown(context.Background())
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
 
 func (s *StorageNode) routes() http.Handler {
@@ -308,4 +338,41 @@ func (s *StorageNode) ttlCleanup() {
 			log.Printf("TTL cleanup: removed %d expired shards", len(expired))
 		}
 	}
+}
+
+// autoRegister periodically POSTs to the web backend so it knows this node
+// is alive and reachable at publicURL.
+func (s *StorageNode) autoRegister(registerURL, publicURL string, capacity int64) {
+	body := fmt.Sprintf(`{"url":%q,"capacity_bytes":%d}`, publicURL, capacity)
+	register := func() {
+		resp, err := http.Post(registerURL+"/api/node/register", "application/json", strings.NewReader(body))
+		if err != nil {
+			log.Printf("Node registration failed: %v", err)
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			log.Printf("Node registration returned %d", resp.StatusCode)
+			return
+		}
+		log.Printf("Registered with %s as %s", registerURL, publicURL)
+	}
+
+	register()
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		register()
+	}
+}
+
+// deregister tells the web backend this node is going away.
+func (s *StorageNode) deregister(registerURL, publicURL string) {
+	body := fmt.Sprintf(`{"url":%q}`, publicURL)
+	resp, err := http.Post(registerURL+"/api/node/deregister", "application/json", strings.NewReader(body))
+	if err != nil {
+		log.Printf("Node deregistration failed: %v", err)
+		return
+	}
+	resp.Body.Close()
 }

@@ -290,19 +290,22 @@ If a node fails while sending, its shards are stored on the remaining nodes inst
 ### Contributing a node
 
 1. **Find a machine** with a public address, spare disk and decent upload bandwidth. Put the node behind HTTPS (for example a Caddy or nginx reverse proxy in front of port 7001).
-2. **Run it** — e.g. with 100 GB of capacity:
+2. **Run it** — e.g. with 100 GB of capacity, auto-registering with a Help Peer site:
    ```bash
    docker run -d --restart unless-stopped -p 7001:7001 -v helppeer-shards:/data \
      -e STORAGE_CAPACITY=107374182400 \
+     -e STORAGE_PUBLIC_URL=https://node.example.com \
+     -e HELPEER_REGISTER_URL=https://helppeer.example.com \
      $(docker build -q ./storage-node)
    ```
    Or use any S3-compatible bucket (AWS S3, Cloudflare R2, Backblaze B2, MinIO) with `STORAGE_BACKEND=s3`; see [Configuration](#storage-node).
-3. **Check it:** `curl https://node.example.com/health` reports capacity, usage and shard count.
-4. **Share the URL.** Nodes aren't discovered automatically yet (DHT discovery is on the [roadmap](#roadmap)). Give your node's URL to the operator of a Help Peer site, who adds it to `STORAGE_NODES` (and `STORAGE_NODES_PUBLIC`), or to people who send with `--nodes` / `HELPEER_STORAGE_NODES`.
+3. **That's it.** The node health-checks itself with the site on startup and re-registers every 2 minutes. If it stops heartbeating for 5 minutes, the site drops it automatically. On clean shutdown (SIGTERM/SIGINT) it deregisters.
+
+You can also run a node without auto-registration and give its URL to a site operator manually, or to people who send with `--nodes` / `HELPEER_STORAGE_NODES`.
 
 **Being a good node:** stay up for at least 24 hours after your last upload so those transfers can finish; keep the same data volume across restarts (expiry times survive restarts); and leave some free disk beyond `STORAGE_CAPACITY`. Erasure coding tolerates nodes going away, but every node that disappears reduces the margin for everyone.
 
-**For site operators:** list at least 3 nodes so a transfer survives losing any one of them (with 12 or more, any four). Contributed nodes are added by appending their URLs to `STORAGE_NODES` in the same order as `STORAGE_NODES_PUBLIC`.
+**For site operators:** list at least 3 nodes in `STORAGE_NODES` so a transfer survives losing any one of them (with 12 or more, any four). Auto-registered nodes are persisted in `nodes.json` and combined with the env-configured ones on restart.
 
 ## Architecture
 
@@ -377,6 +380,8 @@ A web backend reaches the relay from a single address for all its users, so it a
 | `S3_ACCESS_KEY` | — | S3 access key (s3 backend) |
 | `S3_SECRET_KEY` | — | S3 secret key (s3 backend) |
 | `S3_PREFIX` | `shards` | Key prefix in bucket (s3 backend) |
+| `STORAGE_PUBLIC_URL` | `http://localhost:PORT` | Public URL the node advertises when auto-registering |
+| `HELPEER_REGISTER_URL` | — | URL of a Help Peer web backend to auto-register with |
 
 ### Client
 

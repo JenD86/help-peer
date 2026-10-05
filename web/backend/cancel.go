@@ -86,7 +86,7 @@ func (s *Server) cancelHandler(w http.ResponseWriter, req *http.Request) {
 	sem := make(chan struct{}, 16)
 	var wg sync.WaitGroup
 	for _, sh := range body.Shards {
-		nodeURL, ok := s.internalNodeURL(sh.Node)
+		nodeURL, ok := s.nodes.InternalURL(sh.Node)
 		if !ok || !isHexHash(sh.Hash) {
 			counts["failed"]++
 			continue

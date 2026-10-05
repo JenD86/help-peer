@@ -50,4 +50,4 @@ Errors raise exceptions. `receive()` also resumes interrupted downloads.
 
 ## Storage nodes
 
-Encrypted shards wait on storage nodes run by this site and volunteers. To contribute one, see https://github.com/JenD86/help-peer#storage-nodes
+Encrypted shards wait on storage nodes run by this site and volunteers. To contribute one, run the storage-node Docker image with `HELPEER_REGISTER_URL` set to this site's URL and `STORAGE_PUBLIC_URL` set to the node's public HTTPS URL — it will auto-register and heartbeat every 2 minutes. See https://github.com/JenD86/help-peer#storage-nodes

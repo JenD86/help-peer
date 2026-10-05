@@ -91,11 +91,14 @@ helppeer --json send ./dataset-dir --to alice            # deliver to a username
         <h3 className="font-semibold text-gray-900 mb-2">Contribute a node</h3>
         <p className="text-gray-600 mb-3">
           Got a server with spare disk and bandwidth? Run a node (here with 100 GB of space), put it behind HTTPS, and
-          send its URL to this site's operator to be added.
+          point it at this site — it registers itself automatically.
         </p>
         <Code>{`git clone ${REPO} && cd help-peer
 docker run -d --restart unless-stopped -p 7001:7001 -v helppeer-shards:/data \\
-  -e STORAGE_CAPACITY=107374182400 $(docker build -q ./storage-node)
+  -e STORAGE_CAPACITY=107374182400 \\
+  -e STORAGE_PUBLIC_URL=https://your-node.example.com \\
+  -e HELPEER_REGISTER_URL=${window.location.origin} \\
+  $(docker build -q ./storage-node)
 curl http://localhost:7001/health`}</Code>
         <p className="text-sm text-gray-500 mt-3">
           Details on costs, S3-backed nodes and what operators can see are in the{' '}
