@@ -42,6 +42,9 @@ type Server struct {
 	manifestUploads *rateLimiter // manifest uploads per client
 	notifyLimit     *rateLimiter // notification emails per sender
 	directoryLimit  *rateLimiter // username searches/lookups per user
+
+	nodeRegistrations *rateLimiter // new storage node registrations per client
+	adminToken        string       // NODE_ADMIN_TOKEN for /api/admin/nodes; empty disables it
 }
 
 type SMTPConfig struct {
@@ -116,7 +119,14 @@ func main() {
 	if public := strings.TrimRight(os.Getenv("RELAY_URL_PUBLIC"), "/"); public != "" {
 		server.relayPublicURL = public
 	}
-	server.nodes.StartPruner()
+	// Volunteer nodes on private addresses are refused unless explicitly
+	// allowed, for testing on a LAN.
+	if os.Getenv("ALLOW_PRIVATE_NODES") == "1" {
+		log.Printf("ALLOW_PRIVATE_NODES=1: volunteer storage nodes may use private addresses (testing only)")
+		server.nodes.SetAllowPrivate(true)
+	}
+	server.adminToken = os.Getenv("NODE_ADMIN_TOKEN")
+	server.nodes.StartMaintenance()
 	if token := os.Getenv("RELAY_TRUSTED_TOKEN"); token != "" {
 		httpClient.Transport = &relayAuthTransport{base: http.DefaultTransport, relayURL: strings.TrimRight(relayURL, "/"), token: token}
 	}
@@ -137,13 +147,15 @@ func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, b
 		auth:            NewAuth(db, smtp, baseURL),
 		relayURL:        relayURL,
 		relayPublicURL:  relayURL,
-		nodes:           newNodeRegistry(nodes, dataDir),
+		nodes:           newNodeRegistry(nodes, dataDir, false),
 		smtpConfig:      smtp,
 		static:          static,
 		manifestMisses:  newRateLimiter("manifest-misses", 30, time.Minute),
 		manifestUploads: newRateLimiter("manifest-uploads", 30, time.Minute),
 		notifyLimit:     newRateLimiter("notify", 50, time.Hour),
 		directoryLimit:  newRateLimiter("directory", 60, time.Minute),
+
+		nodeRegistrations: newRateLimiter("node-registrations", 30, time.Hour),
 	}
 }
 
@@ -165,7 +177,7 @@ func (s *Server) authMeHandler(w http.ResponseWriter, req *http.Request) {
 // limiters lists every rate limiter, for saving their state.
 func (s *Server) limiters() []*rateLimiter {
 	return []*rateLimiter{
-		s.manifestMisses, s.manifestUploads, s.notifyLimit, s.directoryLimit,
+		s.manifestMisses, s.manifestUploads, s.notifyLimit, s.directoryLimit, s.nodeRegistrations,
 		s.auth.requestsPerIP, s.auth.requestsPerEmail,
 	}
 }
@@ -213,6 +225,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/health", s.healthHandler)
 	mux.HandleFunc("/api/node/register", s.nodeRegisterHandler)
 	mux.HandleFunc("/api/node/deregister", s.nodeDeregisterHandler)
+	mux.HandleFunc("/api/admin/nodes", s.adminNodesHandler)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 	})
@@ -265,7 +278,6 @@ func parseStorageNodes(internal, public string) ([]StorageNode, error) {
 	}
 	return nodes, nil
 }
-
 
 var hexHashRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
