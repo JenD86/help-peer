@@ -478,14 +478,9 @@ func (s *Server) registerTransferHandler(w http.ResponseWriter, req *http.Reques
 // configHandler tells the CLI/SDK which relay and storage nodes this site
 // uses, so a logged-in client talks to the same ones.
 func (s *Server) configHandler(w http.ResponseWriter, req *http.Request) {
-	all := s.nodes.AllNodes()
-	nodes := make([]string, len(all))
-	for i, n := range all {
-		nodes[i] = n.Public
-	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"relay_url":     s.relayPublicURL,
-		"storage_nodes": nodes,
+		"storage_nodes": s.nodes.ConfigNodes(),
 	})
 }
 

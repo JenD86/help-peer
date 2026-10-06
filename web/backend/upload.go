@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/klauspost/reedsolomon"
-	"lukechampine.com/blake3"
 )
 
 const (
@@ -85,19 +84,19 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Upload the shards in parallel (round-robin node assignment, moving a
-	// failed node's shards to the next healthy node)
+	// Upload the shards in parallel, spread over nodes with room for them
+	// (no more than two per volunteer network), moving a shard elsewhere if
+	// its node fails.
+	place := s.nodes.newPlacement(int64(len(shards[0])))
 	infos := make([]ShardInfo, len(shards))
 	errs := make([]error, len(shards))
 	var wg sync.WaitGroup
 	for i, shard := range shards {
-		sum := blake3.Sum256(shard)
-		hash := hex.EncodeToString(sum[:])
-
+		hash := blake3Hex(shard)
 		wg.Add(1)
 		go func(i int, hash string, shard []byte) {
 			defer wg.Done()
-			node, err := s.uploadShardWithFailover(i, hash, shard, deleteTokenHash)
+			node, err := s.uploadShard(place, hash, shard, deleteTokenHash)
 			infos[i] = ShardInfo{Index: i, Hash: hash, Node: node.Public}
 			errs[i] = err
 		}(i, hash, shard)
@@ -107,6 +106,10 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 	for _, err := range errs {
 		if err != nil {
 			log.Printf("Shard upload error: %v", err)
+			if errors.Is(err, errNoCapacity) {
+				writeError(w, http.StatusServiceUnavailable, "not enough storage space available right now")
+				return
+			}
 			writeError(w, http.StatusBadGateway, "shard upload failed")
 			return
 		}
@@ -115,35 +118,24 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 	writeJSON(w, http.StatusOK, SegmentUploadResponse{EncryptedSize: len(data), Shards: infos})
 }
 
-// uploadShardWithFailover stores a shard on its round-robin node, falling
-// back to the next healthy node if that one fails. Nodes marked down are
-// tried last rather than never, in case they have recovered.
-func (s *Server) uploadShardWithFailover(idx int, hash string, shard []byte, deleteTokenHash string) (StorageNode, error) {
-	nodes := s.nodes.AllNodes()
-	var healthy, down []int
-	for offset := range nodes {
-		i := (idx + offset) % len(nodes)
-		if s.nodes.IsDown(nodes[i].Internal) {
-			down = append(down, i)
-		} else {
-			healthy = append(healthy, i)
+// uploadShard stores a shard on the node the placement picks, trying
+// others if it fails. A node saying it's full is skipped without penalty.
+func (s *Server) uploadShard(place *placement, hash string, shard []byte, deleteTokenHash string) (placeTarget, error) {
+	for {
+		t, err := place.pick()
+		if err != nil {
+			return placeTarget{}, err
 		}
-	}
-
-	lastErr := fmt.Errorf("no storage nodes configured")
-	for _, i := range append(healthy, down...) {
-		node := nodes[i]
-		_, err := putWithRetry(node.Internal+"/shard/"+hash, shard, map[string]string{
+		status, err := putWithRetry(s.nodes.ClientFor(t.Key), t.Internal+"/shard/"+hash, shard, map[string]string{
 			"X-Delete-Token-Hash": deleteTokenHash,
 		})
 		if err == nil {
-			return node, nil
+			place.succeeded(t, hash, len(shard))
+			return t, nil
 		}
-		log.Printf("Storage node %s failed: %v", node.Internal, err)
-		s.nodes.MarkDown(node.Internal)
-		lastErr = err
+		log.Printf("Storage node %s failed: %v", t.Internal, err)
+		place.failed(t, status == http.StatusInsufficientStorage)
 	}
-	return StorageNode{}, lastErr
 }
 
 // ManifestUploadRequest carries the browser-encrypted manifest plus the
@@ -266,7 +258,7 @@ func truncate(s string, n int) string {
 
 // putWithRetry PUTs data to url, retrying network errors and 5xx responses.
 // It returns the final status code.
-func putWithRetry(url string, data []byte, headers map[string]string) (int, error) {
+func putWithRetry(client *http.Client, url string, data []byte, headers map[string]string) (int, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -280,7 +272,7 @@ func putWithRetry(url string, data []byte, headers map[string]string) (int, erro
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
-		resp, err := httpClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
 			continue
@@ -290,7 +282,9 @@ func putWithRetry(url string, data []byte, headers map[string]string) (int, erro
 			return resp.StatusCode, nil
 		}
 		lastErr = fmt.Errorf("%s returned %d", url, resp.StatusCode)
-		if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+		// "Full" (507) won't change by retrying; nor will other client errors.
+		if resp.StatusCode == http.StatusInsufficientStorage ||
+			(resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests) {
 			return resp.StatusCode, lastErr
 		}
 	}
@@ -298,7 +292,7 @@ func putWithRetry(url string, data []byte, headers map[string]string) (int, erro
 }
 
 func uploadManifest(relayURL, hash string, data []byte, maxRetrievals int, ackHash string) (int, error) {
-	return putWithRetry(relayURL+"/manifest/"+hash, data, map[string]string{
+	return putWithRetry(httpClient, relayURL+"/manifest/"+hash, data, map[string]string{
 		"X-Max-Retrievals": fmt.Sprintf("%d", maxRetrievals),
 		"X-Ack-Hash":       ackHash,
 	})

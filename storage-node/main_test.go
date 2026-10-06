@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +24,8 @@ func newTestNode(t *testing.T, capacity int64) (*StorageNode, *DiskStore, string
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := &StorageNode{store: store, capacityBytes: capacity, maxShardBytes: 1024, started: time.Now(), ttlSeconds: 3600}
+	_, key, _ := ed25519.GenerateKey(nil)
+	node := &StorageNode{store: store, capacityBytes: capacity, maxShardBytes: 1024, started: time.Now(), ttlSeconds: 3600, key: key}
 	srv := httptest.NewServer(node.routes())
 	t.Cleanup(srv.Close)
 	return node, store, srv.URL
@@ -189,5 +194,77 @@ func TestTokenSidecarNotCountedAsShard(t *testing.T) {
 	restarted, _ := NewDiskStore(dir, 3600)
 	if restarted.ShardCount() != 1 || restarted.UsedBytes() != int64(len(data)) {
 		t.Fatalf("count=%d used=%d", restarted.ShardCount(), restarted.UsedBytes())
+	}
+}
+
+func TestHealthReportsNodeIDAndAvailableSpace(t *testing.T) {
+	node, _, base := newTestNode(t, 1000)
+	data := bytes.Repeat([]byte("z"), 300)
+	put(t, base+"/shard/"+hashOf(data), data)
+
+	resp, err := http.Get(base + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h HealthResponse
+	json.NewDecoder(resp.Body).Decode(&h)
+	resp.Body.Close()
+	if h.NodeID != nodeID(node.key.Public().(ed25519.PublicKey)) || !strings.HasPrefix(h.NodeID, "ed25519:") {
+		t.Fatalf("node id %q", h.NodeID)
+	}
+	if h.AvailableBytes != 700 {
+		t.Fatalf("available %d, want 700", h.AvailableBytes)
+	}
+}
+
+func TestAvailableUsesRealDiskSpace(t *testing.T) {
+	node, _, _ := newTestNode(t, 1<<62) // claims far more than any disk has
+	node.dataDir = t.TempDir()
+	free, ok := diskFreeBytes(node.dataDir)
+	if !ok {
+		t.Skip("disk free space not available on this platform")
+	}
+	if got := node.available(); got > free || got < free-(64<<20) {
+		t.Fatalf("available %d, disk free %d", got, free)
+	}
+	// Uploads that won't fit on the disk are refused as "full" (507).
+	node.diskReserve = free + 1
+	if node.reserve(1) {
+		t.Fatal("reserved space the disk doesn't have")
+	}
+}
+
+func TestNodeKeyIsCreatedOnceAndPrivate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "node_key")
+	k1, err := loadOrCreateKey(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, _ := loadOrCreateKey(path)
+	if !k1.Equal(k2) {
+		t.Fatal("key changed between starts")
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0600 {
+		t.Fatalf("key file mode %v", info.Mode().Perm())
+	}
+}
+
+func TestSignedRequestsVerify(t *testing.T) {
+	node, _, _ := newTestNode(t, 1<<20)
+	var gotBody []byte
+	var gotSig string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotSig = r.Header.Get("X-Node-Signature")
+	}))
+	defer srv.Close()
+
+	node.sendSigned(srv.URL, nodeRequest{Action: "register", URL: "https://node.example.com"})
+	var r nodeRequest
+	json.Unmarshal(gotBody, &r)
+	pub, _ := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(r.NodeID, "ed25519:"))
+	sig, _ := base64.RawURLEncoding.DecodeString(gotSig)
+	if !ed25519.Verify(pub, gotBody, sig) || r.Action != "register" || r.Timestamp == 0 {
+		t.Fatalf("bad signed request %s", gotBody)
 	}
 }

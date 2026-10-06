@@ -86,21 +86,23 @@ func (s *Server) cancelHandler(w http.ResponseWriter, req *http.Request) {
 	sem := make(chan struct{}, 16)
 	var wg sync.WaitGroup
 	for _, sh := range body.Shards {
-		nodeURL, ok := s.nodes.InternalURL(sh.Node)
+		nodeURL, key, ok := s.nodes.InternalURL(sh.Node)
 		if !ok || !isHexHash(sh.Hash) {
+			mu.Lock() // workers update counts concurrently
 			counts["failed"]++
+			mu.Unlock()
 			continue
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(url string) {
+		go func(client *http.Client, url string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			outcome := deleteShard(url, body.DeleteToken)
+			outcome := deleteShard(client, url, body.DeleteToken)
 			mu.Lock()
 			counts[outcome]++
 			mu.Unlock()
-		}(nodeURL + "/shard/" + sh.Hash)
+		}(s.nodes.ClientFor(key), nodeURL+"/shard/"+sh.Hash)
 	}
 	wg.Wait()
 
@@ -114,13 +116,13 @@ func (s *Server) cancelHandler(w http.ResponseWriter, req *http.Request) {
 
 // deleteShard deletes one shard with the transfer's delete token and
 // reports "deleted", "already_gone" or "failed".
-func deleteShard(url, token string) string {
+func deleteShard(client *http.Client, url, token string) string {
 	req, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err != nil {
 		return "failed"
 	}
 	req.Header.Set("X-Delete-Token", token)
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "failed"
 	}

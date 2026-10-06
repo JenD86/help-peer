@@ -283,9 +283,9 @@ If a node fails while sending, its shards are stored on the remaining nodes inst
 
 **What they are.** A storage node is a small HTTP server (`storage-node/`) that holds encrypted pieces of transfers ("shards") for up to 24 hours, so the sender can go offline. Every 64 MB of a transfer is encrypted and erasure-coded into 12 shards of about 8 MB (8 data + 4 parity); any 8 rebuild it. Senders spread the 12 shards across all the nodes they know about, so the more independent nodes a deployment has, the more node failures each transfer survives.
 
-**What an operator can see.** Only ciphertext shards, each named by its own BLAKE3 hash, plus the IP addresses that connect. Not file names, contents, transfer codes or keys — shards are useless without the code, which never reaches a node. Nodes reject any upload whose content doesn't match its hash, and shards can only be deleted early with a token from the encrypted manifest.
+**What an operator can see.** Only ciphertext shards, each named by its own BLAKE3 hash, plus the IP addresses that connect. Not file names, contents, transfer codes or keys — shards are useless without the code, which never reaches a node. Note that CLI and SDK users talk to nodes directly, so a node's operator can see their IP addresses and the size and timing of their transfers; web users are shielded, because the site's backend talks to the nodes for them. Nodes reject any upload whose content doesn't match its hash, and shards can only be deleted early with a token from the encrypted manifest.
 
-**What it costs.** Disk and bandwidth. A node keeps each shard for `STORAGE_TTL` (24 hours by default) and serves it to the receiver, usually once. Transfers use 1.5× their size across all nodes. `STORAGE_CAPACITY` caps how much a node stores; when it's full it refuses new shards (HTTP 507) and senders move those shards to other nodes.
+**What it costs.** Disk and bandwidth. A node keeps each shard for `STORAGE_TTL` (24 hours by default) and serves it to the receiver, usually once. Transfers use 1.5× their size across all nodes. `STORAGE_CAPACITY` caps how much a node stores, and the node also checks the disk's real free space (keeping `STORAGE_DISK_RESERVE`, 512 MiB by default, spare). When it can't take more it refuses new shards (HTTP 507) and senders move those shards to other nodes — being full is normal and never counts against a node.
 
 ### Contributing a node
 
@@ -299,13 +299,32 @@ If a node fails while sending, its shards are stored on the remaining nodes inst
      $(docker build -q ./storage-node)
    ```
    Or use any S3-compatible bucket (AWS S3, Cloudflare R2, Backblaze B2, MinIO) with `STORAGE_BACKEND=s3`; see [Configuration](#storage-node).
-3. **That's it.** The node health-checks itself with the site on startup and re-registers every 2 minutes. If it stops heartbeating for 5 minutes, the site drops it automatically. On clean shutdown (SIGTERM/SIGINT) it deregisters.
+   `STORAGE_PUBLIC_URL` must be the address other machines use to reach the node; it's required for auto-registration.
+3. **That's it.** On first start the node creates its identity key (`/data/node_key`; keep it with the data volume) and registers. The site then:
+   - checks that the URL's `/health` reports the same key that signed the registration, so nobody can register someone else's server;
+   - refuses nodes on private or internal addresses;
+   - writes a 1 MB test shard and reads it back.
+
+   After that the node heartbeats every 2 minutes with its free space, signed with its key, so only it can update or remove its registration. If it stops heartbeating for 5 minutes, the site stops using it; on clean shutdown (SIGTERM/SIGINT) it deregisters.
 
 You can also run a node without auto-registration and give its URL to a site operator manually, or to people who send with `--nodes` / `HELPEER_STORAGE_NODES`.
 
+**How the site keeps volunteers honest.** There's no reward for lying about storage, so the site doesn't make new nodes earn trust; it uses each node up to its reported free space straight away. Instead:
+
+- **Spread:** at most 2 of a segment's 12 shards go to volunteer nodes in the same network (IPv4 /24 or IPv6 /48). A segment is lost only if 5 shards are, so one person running many nodes from one server or network can't make transfers unrecoverable.
+- **Audits:** the site spot-checks a sample of the shards it stores on volunteer nodes (about 1 in 20) at a random time before they expire, and counts any shard a node returns corrupted. A node that loses or corrupts 3 of its last 20 audited shards is suspended from new uploads for 24 hours. Only data a node accepted (and that hasn't expired) is ever checked, so being full or briefly offline doesn't count; leaving and rejoining doesn't reset its record.
+
 **Being a good node:** stay up for at least 24 hours after your last upload so those transfers can finish; keep the same data volume across restarts (expiry times survive restarts); and leave some free disk beyond `STORAGE_CAPACITY`. Erasure coding tolerates nodes going away, but every node that disappears reduces the margin for everyone.
 
-**For site operators:** list at least 3 nodes in `STORAGE_NODES` so a transfer survives losing any one of them (with 12 or more, any four). Auto-registered nodes are persisted in `nodes.json` and combined with the env-configured ones on restart.
+**For site operators:** list at least 3 nodes in `STORAGE_NODES` so a transfer survives losing any one of them (with 12 or more, any four). Your own nodes aren't subject to the per-network limit, so uploads always have somewhere to go. Volunteer nodes and their audit records are kept in `nodes.json`. Set `NODE_ADMIN_TOKEN` to see and manage them:
+
+```bash
+curl -H "Authorization: Bearer $NODE_ADMIN_TOKEN" https://helppeer.example.com/api/admin/nodes        # list, with audit stats
+curl -H "Authorization: Bearer $NODE_ADMIN_TOKEN" -d '{"action":"ban","node_id":"ed25519:..."}' \
+  https://helppeer.example.com/api/admin/nodes                                                     # also: unban, reinstate
+```
+
+The CLI and SDK spread shards round-robin over the list from `/api/config`, so that list includes at most one volunteer node per network, and only once there are enough nodes that each would get no more than 2 of a segment's shards.
 
 ## Architecture
 
@@ -380,8 +399,10 @@ A web backend reaches the relay from a single address for all its users, so it a
 | `S3_ACCESS_KEY` | — | S3 access key (s3 backend) |
 | `S3_SECRET_KEY` | — | S3 secret key (s3 backend) |
 | `S3_PREFIX` | `shards` | Key prefix in bucket (s3 backend) |
-| `STORAGE_PUBLIC_URL` | `http://localhost:PORT` | Public URL the node advertises when auto-registering |
+| `STORAGE_PUBLIC_URL` | — | Public URL the node advertises; required with `HELPEER_REGISTER_URL` |
 | `HELPEER_REGISTER_URL` | — | URL of a Help Peer web backend to auto-register with |
+| `STORAGE_KEY_FILE` | `$STORAGE_DIR/node_key` | The node's identity key (created on first start; keep it private) |
+| `STORAGE_DISK_RESERVE` | `536870912` (512 MiB) | Disk space the node always leaves free |
 
 ### Client
 
@@ -411,6 +432,8 @@ The Python CLI takes the same `--relay`, `--nodes` and `--json` flags as the Rus
 | `STORAGE_NODES` | `http://127.0.0.1:7001` | Comma-separated storage node URLs, as the backend reaches them |
 | `RELAY_URL_PUBLIC` | `RELAY_URL` | The relay as CLI/SDK users reach it; given to logged-in clients via `/api/config` |
 | `RELAY_TRUSTED_TOKEN` | — | Must match the relay's, to skip its per-IP limits (this server limits per user itself) |
+| `NODE_ADMIN_TOKEN` | — | Enables `/api/admin/nodes` (list, ban, unban, reinstate volunteer nodes) |
+| `ALLOW_PRIVATE_NODES` | off | Set to `1` to let volunteer nodes use private addresses — LAN testing only, and it disables the per-network limit for them |
 | `STORAGE_NODES_PUBLIC` | `STORAGE_NODES` | The same nodes (same order) as other clients reach them; written into manifests so CLI users can receive web transfers |
 | `WEB_TRUST_PROXY` | off | Set to `1` behind a reverse proxy so rate limits use `X-Forwarded-For`. Leave off otherwise, or clients can spoof their address |
 | `WEB_BASE_URL` | `http://localhost:{WEB_PORT}` | Public URL used in login emails. **Required when SMTP is configured** |
