@@ -12,6 +12,9 @@ __pycache__/
 
 # Data directories (runtime)
 /tmp/helppeer-*
+# Default DATA_DIR for docker compose: holds sessions, API token hashes,
+# inbox transfer codes, manifests and shards. Never commit it.
+/data/
 
 # IDE
 .idea/
