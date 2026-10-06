@@ -436,6 +436,11 @@ The Python CLI takes the same `--relay`, `--nodes` and `--json` flags as the Rus
 | `ALLOW_PRIVATE_NODES` | off | Set to `1` to let volunteer nodes use private addresses — LAN testing only, and it disables the per-network limit for them |
 | `STORAGE_NODES_PUBLIC` | `STORAGE_NODES` | The same nodes (same order) as other clients reach them; written into manifests so CLI users can receive web transfers |
 | `WEB_TRUST_PROXY` | off | Set to `1` behind a reverse proxy so rate limits use `X-Forwarded-For`. Leave off otherwise, or clients can spoof their address |
+| `TRANSFER_MAX_BYTES` | `10737418240` (10 GiB) | Largest single transfer the website accepts. Before uploading, the page announces the total size (`POST /api/upload/begin`) and gets a ticket that every segment must carry |
+| `TRANSFERS_PER_HOUR` | `2` | Transfers one client may start per hour (an IPv6 /64 counts as one client) |
+| `SEGMENT_DAILY_BYTES` | `21474836480` (20 GiB) | Bytes one client may send per 24 hours, reserved when a transfer starts and partly given back if it is not used up (`POST /api/upload/finish`). Over a limit the answer is HTTP 429 with a `Retry-After` header; `GET /api/upload/quota` shows what is left. None of these apply to the CLI and SDK, which write to the storage nodes directly |
+| `SEGMENT_CONCURRENCY` | `3` | Segments one client may be uploading at once |
+| `SEGMENT_MAX_CONCURRENT` | `8` | Segments being uploaded at once across all clients (each is held in memory while it is erasure-coded) |
 | `WEB_BASE_URL` | `http://localhost:{WEB_PORT}` | Public URL used in login emails. **Required when SMTP is configured** |
 | `WEB_DATA_DIR` | `/tmp/helppeer-web` | Data directory for user DB |
 | `SMTP_HOST` | — | SMTP server hostname (e.g. `smtp.gmail.com`) |

@@ -44,6 +44,11 @@ type Server struct {
 	directoryLimit  *rateLimiter // username searches/lookups per user
 
 	nodeRegistrations *rateLimiter // new storage node registrations per client
+	segmentBytes      *rateLimiter // bytes of uploaded segments per client per 24 hours
+	segmentSlots      *slotLimiter // segments being uploaded at once, per client and overall
+	transferStarts    *rateLimiter // transfers a client may start per hour
+	tickets           *ticketBook  // permissions to upload, one per transfer
+	transferMax       int64        // largest single transfer, in bytes
 	adminToken        string       // NODE_ADMIN_TOKEN for /api/admin/nodes; empty disables it
 }
 
@@ -156,6 +161,15 @@ func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, b
 		directoryLimit:  newRateLimiter("directory", 60, time.Minute),
 
 		nodeRegistrations: newRateLimiter("node-registrations", 30, time.Hour),
+		segmentBytes: newRateLimiter("segment-bytes",
+			int(envInt64("SEGMENT_DAILY_BYTES", defaultSegmentDailyBytes)), segmentBudgetWindow),
+		segmentSlots: newSlotLimiter(
+			int(envInt64("SEGMENT_CONCURRENCY", defaultSegmentPerClient)),
+			int(envInt64("SEGMENT_MAX_CONCURRENT", defaultSegmentTotal))),
+		transferStarts: newRateLimiter("transfer-starts",
+			int(envInt64("TRANSFERS_PER_HOUR", defaultTransfersPerHour)), time.Hour),
+		tickets:     newTicketBook(),
+		transferMax: envInt64("TRANSFER_MAX_BYTES", defaultTransferMaxBytes),
 	}
 }
 
@@ -178,7 +192,7 @@ func (s *Server) authMeHandler(w http.ResponseWriter, req *http.Request) {
 func (s *Server) limiters() []*rateLimiter {
 	return []*rateLimiter{
 		s.manifestMisses, s.manifestUploads, s.notifyLimit, s.directoryLimit, s.nodeRegistrations,
-		s.auth.requestsPerIP, s.auth.requestsPerEmail,
+		s.segmentBytes, s.transferStarts, s.auth.requestsPerIP, s.auth.requestsPerEmail,
 	}
 }
 
@@ -205,6 +219,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/auth/logout", s.auth.authLogoutHandler)
 	mux.HandleFunc("/api/auth/me", s.authMeHandler)
 	mux.HandleFunc("/api/upload/segment", s.segmentUploadHandler)
+	mux.HandleFunc("/api/upload/quota", s.uploadQuotaHandler)
+	mux.HandleFunc("/api/upload/begin", s.uploadBeginHandler)
+	mux.HandleFunc("/api/upload/finish", s.uploadFinishHandler)
 	mux.HandleFunc("/api/upload/manifest", s.manifestUploadHandler)
 	mux.HandleFunc("/api/download", s.downloadHandler)
 	mux.HandleFunc("/api/download/segment", s.segmentDownloadHandler)

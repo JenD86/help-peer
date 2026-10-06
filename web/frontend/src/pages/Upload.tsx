@@ -1,11 +1,12 @@
 import { useState, useCallback, useEffect } from 'react'
 import { deriveKeys, relayHash, encryptSegment, generateCode, fileHasher, newSecret, secretHash } from '../lib/crypto'
 import {
-  uploadSegment, uploadManifest, notifyRecipients, checkAuth, cancelTransfer, searchUsers, lookupUser,
+  beginUpload, finishUpload, uploadSegment, uploadManifest, notifyRecipients, checkAuth, cancelTransfer, searchUsers, lookupUser,
   type ShardInfo, type CancelInfo,
 } from '../lib/api'
 
 const SEGMENT_SIZE = 64 * 1024 * 1024 // 64MB
+const SEGMENT_OVERHEAD = 28 // nonce and tag added to each encrypted segment
 const MAX_RETRIEVALS = 100
 const MAX_MESSAGE_CHARS = 2000
 
@@ -131,6 +132,10 @@ export default function Upload() {
   }
 
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
+  // What will actually be sent: every segment grows by SEGMENT_OVERHEAD. The
+  // server is told this up front and refuses anything beyond it.
+  const encryptedTotal = files.reduce(
+    (sum, f) => sum + f.size + SEGMENT_OVERHEAD * Math.ceil(f.size / SEGMENT_SIZE), 0)
 
   const handleUpload = async () => {
     if (files.length === 0) return
@@ -138,6 +143,7 @@ export default function Upload() {
     setProgress('Generating transfer code...')
     setErrorMsg('')
 
+    let ticket = ''
     try {
       const recipientList = recipients
         .split(/[,;\s]+/)
@@ -164,6 +170,13 @@ export default function Upload() {
       const deleteToken = newSecret()
       const deleteTokenHash = secretHash(deleteToken)
 
+      // Ask to upload this much before sending anything, so a transfer that
+      // is not allowed is refused now and not part way through.
+      if (encryptedTotal > 0) {
+        setProgress('Checking upload limits...')
+        ticket = (await beginUpload(encryptedTotal)).ticket
+      }
+
       // Encrypt and upload each file one 64MB segment at a time, so files
       // never have to fit in memory whole.
       const usedPaths = new Set<string>()
@@ -183,7 +196,7 @@ export default function Upload() {
 
           setStatus('uploading')
           setProgress(`Uploading ${file.name} (${pct}% overall)...`)
-          const uploaded = await uploadSegment(encrypted, deleteTokenHash)
+          const uploaded = await uploadSegment(encrypted, deleteTokenHash, ticket)
           segments.push({
             id: `seg_${String(i).padStart(6, '0')}`,
             original_size: plaintext.byteLength,
@@ -252,6 +265,9 @@ export default function Upload() {
       setStatus('error')
       setProgress('')
       setErrorMsg(err.message || 'Upload failed')
+    } finally {
+      // Give back the part of the allowance this transfer did not use.
+      if (ticket) finishUpload(ticket)
     }
   }
 
