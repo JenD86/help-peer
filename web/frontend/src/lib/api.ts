@@ -46,6 +46,10 @@ export async function linkEmail(email: string): Promise<{ status: string; messag
   return (await postJSON('/api/auth/link-email', { email })).json()
 }
 
+export async function unlinkEmail(): Promise<{ status: string }> {
+  return (await postJSON('/api/auth/unlink-email', {})).json()
+}
+
 export async function checkAuth(): Promise<{ authenticated: boolean; id?: string; email?: string; username?: string }> {
   return (await request('/api/auth/me')).json()
 }

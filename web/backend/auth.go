@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,20 +16,46 @@ type Auth struct {
 	smtpConfig *SMTPConfig
 	baseURL    string
 
-	// Login emails go out from the operator's mail account, so cap how many
-	// any one client or address can trigger.
-	requestsPerIP    *rateLimiter
-	requestsPerEmail *rateLimiter
+	// Login and confirmation emails go out from the operator's mail account,
+	// so every way of triggering one is capped. Each feature has its own
+	// budget, so using one does not use up another, and the budgets that are
+	// about an address are keyed by the requester too: someone who keeps
+	// asking for emails to your address only uses up their own allowance.
+	loginPerIP   *rateLimiter // log-in link requests per client
+	loginPerPair *rateLimiter // ... per client and address
+	signupPerIP  *rateLimiter // new accounts per client
+	linkPerIP    *rateLimiter // "link email" requests per client
+	linkPerUser  *rateLimiter // ... per account
+	linkPerPair  *rateLimiter // ... per client and address
+	emailTotal   *rateLimiter // all emails to one address, from anyone
 }
 
 func NewAuth(db *DB, smtp *SMTPConfig, baseURL string) *Auth {
 	return &Auth{
-		db:               db,
-		smtpConfig:       smtp,
-		baseURL:          baseURL,
-		requestsPerIP:    newRateLimiter("login-ip", 10, 15*time.Minute),
-		requestsPerEmail: newRateLimiter("login-email", 3, 15*time.Minute),
+		db:           db,
+		smtpConfig:   smtp,
+		baseURL:      baseURL,
+		loginPerIP:   newRateLimiter("login-ip", 10, 15*time.Minute),
+		loginPerPair: newRateLimiter("login-ip-email", 3, 15*time.Minute),
+		signupPerIP:  newRateLimiter("signup-ip", 10, time.Hour),
+		linkPerIP:    newRateLimiter("link-ip", 10, 15*time.Minute),
+		linkPerUser:  newRateLimiter("link-user", 5, time.Hour),
+		linkPerPair:  newRateLimiter("link-ip-email", 3, 15*time.Minute),
+		emailTotal:   newRateLimiter("email-total", 10, time.Hour),
 	}
+}
+
+// limiters lists the budgets, so their state is saved across restarts.
+func (a *Auth) limiters() []*rateLimiter {
+	return []*rateLimiter{
+		a.loginPerIP, a.loginPerPair, a.signupPerIP,
+		a.linkPerIP, a.linkPerUser, a.linkPerPair, a.emailTotal,
+	}
+}
+
+// pairKey identifies one client asking about one address.
+func pairKey(ip, email string) string {
+	return ip + "|" + strings.ToLower(email)
 }
 
 func (a *Auth) authRequestHandler(w http.ResponseWriter, req *http.Request) {
@@ -51,7 +78,10 @@ func (a *Auth) authRequestHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if !a.requestsPerIP.Allow(clientIP(req), 1) || !a.requestsPerEmail.Allow(strings.ToLower(body.Email), 1) {
+	ip := clientIP(req)
+	if !a.loginPerIP.Allow(ip, 1) ||
+		!a.loginPerPair.Allow(pairKey(ip, body.Email), 1) ||
+		!a.emailTotal.Allow(strings.ToLower(body.Email), 1) {
 		writeError(w, http.StatusTooManyRequests, "too many login requests, try again later")
 		return
 	}
@@ -96,6 +126,10 @@ func (a *Auth) authVerifyHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	userID, err := a.db.VerifyMagicLink(body.Token)
+	if errors.Is(err, errEmailTaken) {
+		writeError(w, http.StatusConflict, "That email address is already in use.")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid or expired link")
 		return
@@ -141,7 +175,7 @@ func (a *Auth) authSignupHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if !a.requestsPerIP.Allow(clientIP(req), 1) {
+	if !a.signupPerIP.Allow(clientIP(req), 1) {
 		writeError(w, http.StatusTooManyRequests, "too many requests, try again later")
 		return
 	}
@@ -202,7 +236,27 @@ func (a *Auth) authLinkEmailHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if !a.requestsPerIP.Allow(clientIP(req), 1) || !a.requestsPerEmail.Allow(strings.ToLower(body.Email), 1) {
+	// The client and account limits come first, then the "already in use"
+	// check, then the limits that are about this address. Answering now
+	// spares the user a pointless email, and probing an address that belongs
+	// to someone else must not use up that person's allowance.
+	ip := clientIP(req)
+	if !a.linkPerIP.Allow(ip, 1) || !a.linkPerUser.Allow(userID, 1) {
+		writeError(w, http.StatusTooManyRequests, "too many requests, try again later")
+		return
+	}
+	if owner, taken := a.db.EmailOwner(body.Email); taken {
+		if owner != userID {
+			writeError(w, http.StatusConflict, "That email address is already in use.")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":  "linked",
+			"message": "That email address is already linked to your account.",
+		})
+		return
+	}
+	if !a.linkPerPair.Allow(pairKey(ip, body.Email), 1) || !a.emailTotal.Allow(strings.ToLower(body.Email), 1) {
 		writeError(w, http.StatusTooManyRequests, "too many requests, try again later")
 		return
 	}
@@ -216,7 +270,11 @@ func (a *Auth) authLinkEmailHandler(w http.ResponseWriter, req *http.Request) {
 	magicURL := fmt.Sprintf("%s/verify?token=%s", a.baseURL, link.Token)
 
 	if a.smtpConfig.Host != "" {
-		if err := sendMagicLinkEmail(a.smtpConfig, body.Email, magicURL); err != nil {
+		var account, currentEmail string
+		if u, ok := a.db.GetUser(userID); ok {
+			account, currentEmail = u.Username, u.Email
+		}
+		if err := sendLinkEmail(a.smtpConfig, body.Email, account, currentEmail, magicURL); err != nil {
 			log.Printf("Failed to send email: %v", err)
 			writeError(w, http.StatusInternalServerError, "failed to send email")
 			return
@@ -229,6 +287,33 @@ func (a *Auth) authLinkEmailHandler(w http.ResponseWriter, req *http.Request) {
 		"status":  "sent",
 		"message": "Check your email to confirm and link it to your account",
 	})
+}
+
+// authUnlinkEmailHandler removes the email from the logged-in account.
+func (a *Auth) authUnlinkEmailHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	cookie, err := req.Cookie("helppeer_session")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "log in to change your email")
+		return
+	}
+	userID, ok := a.db.GetSession(cookie.Value)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "log in to change your email")
+		return
+	}
+	if err := a.db.RemoveEmail(userID); err != nil {
+		if errors.Is(err, errNeedUsername) {
+			writeError(w, http.StatusBadRequest, "Set a username before removing your email, so you can still log in.")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not remove the email")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (a *Auth) authLogoutHandler(w http.ResponseWriter, req *http.Request) {

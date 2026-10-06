@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -125,9 +126,6 @@ func (d *DB) load() {
 			oldUsers[key] = u
 			migrated = true
 		}
-		if u.Email != "" {
-			d.emails[strings.ToLower(u.Email)] = u.ID
-		}
 		if u.Username != "" {
 			d.usernames[u.Username] = u.ID
 		}
@@ -138,6 +136,9 @@ func (d *DB) load() {
 			delete(d.users, oldKey)
 			d.users[u.ID] = u
 		}
+	}
+	if d.indexEmailsLocked() {
+		migrated = true
 	}
 
 	// Sessions: old format has Email but no UserID.
@@ -218,6 +219,39 @@ func (d *DB) load() {
 	if migrated {
 		d.save()
 	}
+}
+
+// indexEmailsLocked builds the email -> account index. If several accounts
+// claim the same address (earlier versions could allow that), the oldest
+// account keeps it and the others lose it. Users is a map, so without a rule
+// the winner would change from one restart to the next. It reports whether
+// any account was changed. Requires d.mu.
+func (d *DB) indexEmailsLocked() bool {
+	owners := map[string]*User{}
+	changed := false
+	for _, u := range d.users {
+		if u == nil || u.Email == "" {
+			continue
+		}
+		key := strings.ToLower(u.Email)
+		cur, taken := owners[key]
+		if !taken {
+			owners[key] = u
+			continue
+		}
+		winner, loser := cur, u
+		if u.CreatedAt.Before(cur.CreatedAt) || (u.CreatedAt.Equal(cur.CreatedAt) && u.ID < cur.ID) {
+			winner, loser = u, cur
+		}
+		log.Printf("Accounts %s and %s have the same email address; %s keeps it", winner.ID, loser.ID, winner.ID)
+		loser.Email = ""
+		owners[key] = winner
+		changed = true
+	}
+	for key, u := range owners {
+		d.emails[key] = u.ID
+	}
+	return changed
 }
 
 // save writes everything to disk. Requires d.mu.
@@ -329,25 +363,71 @@ func (d *DB) GetUserByEmail(email string) (User, bool) {
 	return *u, true
 }
 
+// errNeedUsername is returned when removing an email would leave the account
+// with no way to log in.
+var errNeedUsername = errors.New("set a username before removing your email, so you can still log in")
+
+// RemoveEmail detaches the account's email. An account must keep at least one
+// identity, so it needs a username first.
+func (d *DB) RemoveEmail(userID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	u, ok := d.users[userID]
+	if !ok {
+		return fmt.Errorf("user not found")
+	}
+	if u.Email == "" {
+		return nil
+	}
+	if u.Username == "" {
+		return errNeedUsername
+	}
+	delete(d.emails, strings.ToLower(u.Email))
+	u.Email = ""
+	d.save()
+	return nil
+}
+
+// EmailOwner reports which account, if any, owns an email address.
+func (d *DB) EmailOwner(email string) (string, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	uid, ok := d.emails[strings.ToLower(email)]
+	return uid, ok
+}
+
+// errEmailTaken is returned when an email already belongs to another account.
+var errEmailTaken = errors.New("email already linked to another account")
+
 // LinkEmail associates an email address with an existing user account.
 func (d *DB) LinkEmail(userID, email string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.linkEmailLocked(userID, email); err != nil {
+		return err
+	}
+	d.save()
+	return nil
+}
+
+// linkEmailLocked attaches email to userID. It refuses an address that another
+// account already owns, so one account can never take over another's email.
+// Requires d.mu.
+func (d *DB) linkEmailLocked(userID, email string) error {
 	email = strings.ToLower(email)
-	if existingUID, ok := d.emails[email]; ok && existingUID != userID {
-		return fmt.Errorf("email already linked to another account")
+	if owner, ok := d.emails[email]; ok && owner != userID {
+		return errEmailTaken
 	}
 	u, ok := d.users[userID]
 	if !ok {
 		return fmt.Errorf("user not found")
 	}
-	// Remove old email mapping if any.
+	// Drop the old mapping (the keys are lowercase).
 	if u.Email != "" {
-		delete(d.emails, u.Email)
+		delete(d.emails, strings.ToLower(u.Email))
 	}
 	u.Email = email
 	d.emails[email] = userID
-	d.save()
 	return nil
 }
 
@@ -399,19 +479,13 @@ func (d *DB) VerifyMagicLink(token string) (string, error) {
 	}
 	var userID string
 	if link.UserID != "" {
-		// Link email to an existing user account.
-		u, ok := d.users[link.UserID]
-		if !ok {
+		// Link email to an existing user account, unless another account
+		// already owns that address.
+		if err := d.linkEmailLocked(link.UserID, link.Email); err != nil {
 			d.save()
-			return "", fmt.Errorf("user not found")
+			return "", err
 		}
-		email := strings.ToLower(link.Email)
-		if u.Email != "" {
-			delete(d.emails, u.Email)
-		}
-		u.Email = email
-		d.emails[email] = u.ID
-		userID = u.ID
+		userID = link.UserID
 	} else {
 		u := d.getOrCreateUserByEmailLocked(link.Email)
 		userID = u.ID

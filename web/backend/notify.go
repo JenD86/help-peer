@@ -114,10 +114,7 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 	s.db.SetRecipients(record.ID, senderID, body.Recipients)
 
 	sender, _ := s.db.GetUser(senderID)
-	senderName := sender.Username
-	if senderName == "" {
-		senderName = sender.Email
-	}
+	from := senderDisplay(sender)
 
 	sent, inboxed := 0, 0
 	errors := []string{}
@@ -144,10 +141,10 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		if s.smtpConfig.Host == "" {
-			log.Printf("[DEV] Inbox alert to %s (@%s): transfer '%s' from %s, message: %q", recipient.Email, name, record.TransferName, senderName, record.Message)
+			log.Printf("[DEV] Inbox alert to %s (@%s): transfer '%s' from %s, message: %q", recipient.Email, name, record.TransferName, from.Long, record.Message)
 			continue
 		}
-		if err := sendInboxAlertEmail(s.smtpConfig, recipient.Email, s.auth.baseURL, senderName, record.TransferName, record.Message, record.Files, record.TotalBytes); err != nil {
+		if err := sendInboxAlertEmail(s.smtpConfig, recipient.Email, s.auth.baseURL, from, record.TransferName, record.Message, record.Files, record.TotalBytes); err != nil {
 			log.Printf("Failed to send inbox alert to %s: %v", recipient.Email, err)
 			errors = append(errors, fmt.Sprintf("alert email failed for @%s (the transfer is still in their inbox)", name))
 		}
@@ -159,7 +156,7 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 			sent++
 			continue
 		}
-		if err := sendTransferEmail(s.smtpConfig, recipient, body.Code, record.TransferName, record.Message, senderName, record.Files, record.TotalBytes); err != nil {
+		if err := sendTransferEmail(s.smtpConfig, recipient, s.auth.baseURL, body.Code, record.TransferName, record.Message, from, record.Files, record.TotalBytes); err != nil {
 			log.Printf("Failed to send email to %s: %v", recipient, err)
 			errors = append(errors, fmt.Sprintf("failed: %s", recipient))
 			continue
@@ -197,58 +194,75 @@ func (s *Server) historyHandler(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
-func sendMagicLinkEmail(smtpCfg *SMTPConfig, to, magicURL string) error {
-	subject := "Help Peer — Login Link"
-	body := fmt.Sprintf(`Hello,
-
-Click the link below to log in to Help Peer:
-
-  %s
-
-This link expires in 15 minutes. If you didn't request this, you can safely ignore this email.
-
-— Help Peer`, magicURL)
-
-	return sendEmail(smtpCfg, to, subject, body)
+// senderInfo says how a sender appears to the people they send files to. An
+// email address is never shown in full: an account with no username appears as
+// "Someone", and its address only in masked form.
+type senderInfo struct {
+	Short string // subject lines: the username, or "Someone"
+	Long  string // email bodies: the username, or "Someone (j***@example.com)"
 }
 
-func sendInboxAlertEmail(smtpCfg *SMTPConfig, to, baseURL, senderName, transferName, message string, files int, totalBytes int64) error {
-	subject := fmt.Sprintf("Help Peer — %s sent you files", senderName)
-	body := fmt.Sprintf(`Hello,
-
-%s has sent you files via Help Peer.
-
-  Transfer: %s
-  Files: %d
-  Size: %s
-%s
-They're waiting in your inbox (log in to see them):
-
-  %s/inbox
-
-The transfer expires in 24 hours.
-
-— Help Peer`, senderName, transferName, files, formatBytes(totalBytes), emailMessageBlock(senderName, message), baseURL)
-
-	return sendEmail(smtpCfg, to, subject, body)
+func senderDisplay(u User) senderInfo {
+	if u.Username != "" {
+		return senderInfo{Short: u.Username, Long: u.Username}
+	}
+	if masked := maskEmail(u.Email); masked != "" {
+		return senderInfo{Short: "Someone", Long: "Someone (" + masked + ")"}
+	}
+	return senderInfo{Short: "Someone", Long: "Someone"}
 }
 
-func sendTransferEmail(smtpCfg *SMTPConfig, to, code, transferName, message, senderName string, files int, totalBytes int64) error {
-	subject := fmt.Sprintf("Help Peer — %s sent you files", senderName)
-	body := fmt.Sprintf(`Hello,
+const transferFooter = "The transfer expires in 24 hours."
 
-%s has sent you files via Help Peer.
+func transferDetails(transferName string, files int, totalBytes int64) []emailDetail {
+	return []emailDetail{
+		{"Transfer", transferName},
+		{"Files", fmt.Sprint(files)},
+		{"Size", formatBytes(totalBytes)},
+	}
+}
 
-  Transfer: %s
-  Files: %d
-  Size: %s
-  Code: %s
-%s
-To download, go to Help Peer and enter the code above.
+// inboxAlertContent: tells a user that a transfer is waiting in their inbox.
+func inboxAlertContent(baseURL string, from senderInfo, transferName, message string, files int, totalBytes int64) emailContent {
+	return emailContent{
+		Subject:    fmt.Sprintf("Help Peer — %s sent you files", from.Short),
+		Title:      "You have new files",
+		Intro:      from.Long + " has sent you files via Help Peer.",
+		Details:    transferDetails(transferName, files, totalBytes),
+		NoteFrom:   from.Long,
+		Note:       message,
+		HTMLAction: "They are waiting in your inbox.",
+		TextAction: "They're waiting in your inbox (log in to see them):",
+		Button:     "Open inbox",
+		URL:        baseURL + "/inbox",
+		Footer:     transferFooter,
+	}
+}
 
-— Help Peer`, senderName, transferName, files, formatBytes(totalBytes), code, emailMessageBlock(senderName, message))
+// transferEmailContent: gives the code of a transfer to someone without an account.
+func transferEmailContent(baseURL, code, transferName, message string, from senderInfo, files int, totalBytes int64) emailContent {
+	return emailContent{
+		Subject:    fmt.Sprintf("Help Peer — %s sent you files", from.Short),
+		Title:      "Files for you",
+		Intro:      from.Long + " has sent you files via Help Peer.",
+		Details:    transferDetails(transferName, files, totalBytes),
+		Code:       code,
+		NoteFrom:   from.Long,
+		Note:       message,
+		HTMLAction: "To download, open Help Peer and enter the code above.",
+		TextAction: "To download, go to Help Peer and enter the code above:",
+		Button:     "Open Help Peer",
+		URL:        baseURL + "/download",
+		Footer:     transferFooter,
+	}
+}
 
-	return sendEmail(smtpCfg, to, subject, body)
+func sendInboxAlertEmail(smtpCfg *SMTPConfig, to, baseURL string, from senderInfo, transferName, message string, files int, totalBytes int64) error {
+	return sendContent(smtpCfg, to, inboxAlertContent(baseURL, from, transferName, message, files, totalBytes))
+}
+
+func sendTransferEmail(smtpCfg *SMTPConfig, to, baseURL, code, transferName, message string, from senderInfo, files int, totalBytes int64) error {
+	return sendContent(smtpCfg, to, transferEmailContent(baseURL, code, transferName, message, from, files, totalBytes))
 }
 
 // emailMessageBlock formats the sender's note for an email body, quoted so
@@ -264,15 +278,16 @@ func emailMessageBlock(sender, message string) string {
 	return fmt.Sprintf("\nMessage from %s:\n\n%s\n", sender, strings.Join(lines, "\n"))
 }
 
-func sendEmail(smtpCfg *SMTPConfig, to, subject, body string) error {
-	from := smtpCfg.From
-	if from == "" {
-		from = smtpCfg.User
+// smtpFrom is the sender address for outgoing mail.
+func smtpFrom(smtpCfg *SMTPConfig) string {
+	if smtpCfg.From != "" {
+		return smtpCfg.From
 	}
+	return smtpCfg.User
+}
 
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-		from, to, subject, body)
-
+// deliverEmail hands a finished message to the SMTP server.
+func deliverEmail(smtpCfg *SMTPConfig, from, to string, msg []byte) error {
 	addr := fmt.Sprintf("%s:%s", smtpCfg.Host, smtpCfg.Port)
 
 	// Parse email addresses for auth
@@ -285,10 +300,10 @@ func sendEmail(smtpCfg *SMTPConfig, to, subject, body string) error {
 
 	// Gmail uses TLS on port 465, or STARTTLS on 587
 	if smtpCfg.Port == "465" {
-		return sendMailTLS(addr, auth, from, []string{to}, []byte(msg))
+		return sendMailTLS(addr, auth, from, []string{to}, msg)
 	}
 
-	return smtp.SendMail(addr, auth, fromAddr.Address, []string{to}, []byte(msg))
+	return smtp.SendMail(addr, auth, fromAddr.Address, []string{to}, msg)
 }
 
 func sendMailTLS(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {

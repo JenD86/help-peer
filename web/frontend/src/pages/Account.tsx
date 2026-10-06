@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  getProfile, setProfile, listTokens, createToken, revokeToken, linkEmail,
+  getProfile, setProfile, listTokens, createToken, revokeToken, linkEmail, unlinkEmail,
   type Profile, type APIToken,
 } from '../lib/api'
 
@@ -57,6 +57,17 @@ export default function Account() {
     setTokens(prev => prev.filter(t => t.id !== id))
   }
 
+  const handleUnlinkEmail = async () => {
+    if (!window.confirm('Remove this email from your account? You will stop getting email notifications.')) return
+    try {
+      await unlinkEmail()
+      setProfileState(prev => (prev ? { ...prev, email: '' } : prev))
+      setEmailMsg({ ok: true, text: 'Email removed.' })
+    } catch (err: any) {
+      setEmailMsg({ ok: false, text: err.message || 'Could not remove the email' })
+    }
+  }
+
   const handleLinkEmail = async (e: React.FormEvent) => {
     e.preventDefault()
     try {
@@ -88,16 +99,53 @@ export default function Account() {
       <div>
         <h1 className="text-3xl font-bold text-gray-900 mb-1">Account</h1>
         <p className="text-sm text-gray-500">
-          Logged in as {profile.email || <span className="italic">no email linked</span>}
+          Logged in as{' '}
+          {profile.username ? <span className="font-medium">@{profile.username}</span> : profile.email || <span className="italic">no email linked</span>}
         </p>
       </div>
 
       <section>
         <h2 className="text-lg font-semibold text-gray-900 mb-1">Email</h2>
         {profile.email ? (
-          <p className="text-sm text-gray-600">
-            Your email is <span className="font-medium">{profile.email}</span>. You'll receive notifications when someone sends you files by username.
-          </p>
+          <>
+            <p className="text-sm text-gray-600">
+              Your email is <span className="font-medium">{profile.email}</span>. You'll receive notifications when someone sends you files by username.
+            </p>
+            <form onSubmit={handleLinkEmail} className="space-y-3 mt-4">
+              <label className="block text-sm font-medium text-gray-700">Change email</label>
+              <input
+                type="email"
+                placeholder="new-address@example.com"
+                value={linkEmailAddr}
+                onChange={e => setLinkEmailAddr(e.target.value)}
+                required
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              />
+              <p className="text-xs text-gray-500">
+                We'll send a confirmation link to the new address. Your current email stays in place until you confirm it.
+              </p>
+              <div className="flex items-center gap-4">
+                <button type="submit" className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-indigo-700">
+                  Send confirmation
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUnlinkEmail}
+                  disabled={!profile.username}
+                  title={profile.username ? undefined : 'Set a username first'}
+                  className="text-red-600 hover:text-red-700 text-sm disabled:text-gray-400 disabled:cursor-not-allowed"
+                >
+                  Remove email
+                </button>
+              </div>
+              {!profile.username && (
+                <p className="text-xs text-gray-500">Set a username below before removing your email, so you can still log in.</p>
+              )}
+              {emailMsg && (
+                <p className={`text-sm ${emailMsg.ok ? 'text-green-700' : 'text-red-600'}`}>{emailMsg.text}</p>
+              )}
+            </form>
+          </>
         ) : (
           <>
             <p className="text-sm text-gray-500 mb-4">

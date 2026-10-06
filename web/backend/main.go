@@ -165,10 +165,10 @@ func (s *Server) authMeHandler(w http.ResponseWriter, req *http.Request) {
 
 // limiters lists every rate limiter, for saving their state.
 func (s *Server) limiters() []*rateLimiter {
-	return []*rateLimiter{
+	list := []*rateLimiter{
 		s.manifestMisses, s.manifestUploads, s.notifyLimit, s.directoryLimit,
-		s.auth.requestsPerIP, s.auth.requestsPerEmail,
 	}
+	return append(list, s.auth.limiters()...)
 }
 
 // saveOnExit saves rate limits when the process is asked to stop
@@ -194,6 +194,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/auth/logout", s.auth.authLogoutHandler)
 	mux.HandleFunc("/api/auth/signup", s.auth.authSignupHandler)
 	mux.HandleFunc("/api/auth/link-email", s.auth.authLinkEmailHandler)
+	mux.HandleFunc("/api/auth/unlink-email", s.auth.authUnlinkEmailHandler)
 	mux.HandleFunc("/api/auth/me", s.authMeHandler)
 	mux.HandleFunc("/api/upload/segment", s.segmentUploadHandler)
 	mux.HandleFunc("/api/upload/manifest", s.manifestUploadHandler)
