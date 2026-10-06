@@ -416,7 +416,7 @@ export default function Upload() {
         )}
       </div>
       <p className="text-xs text-gray-500 mb-4">
-        Requires login. Usernames get the transfer in their Help Peer inbox plus an email alert; email addresses get
+        Requires login. Usernames get the transfer in their Help Peer inbox plus an email alert (if they've linked an email); email addresses get
         the code by email. Either way the code passes through this server (and, for email, the recipients' mail
         providers). For the strongest privacy, leave this empty and share the code yourself.
       </p>

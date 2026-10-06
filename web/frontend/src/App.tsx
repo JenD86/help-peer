@@ -13,7 +13,7 @@ import { checkAuth, logout } from './lib/api'
 function NavBar() {
   const location = useLocation()
   const navigate = useNavigate()
-  const [user, setUser] = useState<{ email?: string; username?: string } | null>(null)
+  const [user, setUser] = useState<{ id?: string; email?: string; username?: string } | null>(null)
 
   // Re-check on navigation so logging in/out (or setting a username) shows up.
   useEffect(() => {

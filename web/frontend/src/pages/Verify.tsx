@@ -32,13 +32,13 @@ export default function Verify() {
       {status === 'verifying' && (
         <>
           <div className="animate-spin inline-block w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full mb-4"></div>
-          <p className="text-gray-600">Verifying your login link...</p>
+          <p className="text-gray-600">Verifying...</p>
         </>
       )}
       {status === 'success' && (
         <>
           <div className="text-4xl mb-3">✅</div>
-          <p className="text-green-700 font-medium">Logged in! Redirecting...</p>
+          <p className="text-green-700 font-medium">Verified! Redirecting...</p>
         </>
       )}
       {status === 'error' && (

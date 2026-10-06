@@ -68,7 +68,7 @@ export default function Inbox() {
                 <div className="min-w-0">
                   <div className="font-medium text-gray-900 truncate">{item.transfer_name || 'Untitled'}</div>
                   <div className="text-sm text-gray-500">
-                    From {item.sender_username ? `@${item.sender_username}` : item.sender_email} ·{' '}
+                    From {item.sender_username ? `@${item.sender_username}` : item.sender_email || 'someone'} ·{' '}
                     {item.files} file(s) · {formatBytes(item.total_bytes)} · {timeLeft(item.expires_at)}
                   </div>
                   {item.message && (

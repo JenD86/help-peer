@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -19,8 +20,10 @@ import (
 // dismissed, and in any case when the transfer would expire.
 type InboxItem struct {
 	ID             string    `json:"id"`
-	RecipientEmail string    `json:"recipient_email"`
-	SenderEmail    string    `json:"sender_email"`
+	RecipientID    string    `json:"recipient_id"`
+	SenderID       string    `json:"sender_id"`
+	RecipientEmail string    `json:"recipient_email,omitempty"` // legacy
+	SenderEmail    string    `json:"sender_email,omitempty"`    // legacy
 	SenderUsername string    `json:"sender_username,omitempty"`
 	TransferName   string    `json:"transfer_name"`
 	Message        string    `json:"message,omitempty"`
@@ -36,7 +39,8 @@ type InboxItem struct {
 // stored (as the map key), so a leaked tokens.json can't be used to log in.
 type APIToken struct {
 	ID        string    `json:"id"`
-	Email     string    `json:"email"`
+	UserID    string    `json:"user_id"`
+	Email     string    `json:"email,omitempty"` // legacy
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	LastUsed  time.Time `json:"last_used,omitempty"`
@@ -68,10 +72,10 @@ func normalizeUsername(s string) string {
 	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(s), "@"))
 }
 
-func (d *DB) GetUser(email string) (User, bool) {
+func (d *DB) GetUser(userID string) (User, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	u, ok := d.users[email]
+	u, ok := d.users[userID]
 	if !ok {
 		return User{}, false
 	}
@@ -79,7 +83,7 @@ func (d *DB) GetUser(email string) (User, bool) {
 }
 
 // SetProfile sets a user's username (empty to remove it) and listing.
-func (d *DB) SetProfile(email, username string, listed bool) error {
+func (d *DB) SetProfile(userID, username string, listed bool) error {
 	username = normalizeUsername(username)
 	if username != "" && (!usernameRe.MatchString(username) || reservedUsernames[username]) {
 		return errUsernameInvalid
@@ -87,28 +91,31 @@ func (d *DB) SetProfile(email, username string, listed bool) error {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if owner, ok := d.usernames[username]; ok && owner != email {
+	if owner, ok := d.usernames[username]; ok && owner != userID {
 		return errUsernameTaken
 	}
-	u := d.getOrCreateUserLocked(email)
+	u, ok := d.users[userID]
+	if !ok {
+		return fmt.Errorf("user not found")
+	}
 	if u.Username != "" {
 		delete(d.usernames, u.Username)
 	}
 	u.Username = username
 	u.Listed = listed && username != ""
 	if username != "" {
-		d.usernames[username] = email
+		d.usernames[username] = userID
 	}
 	d.save()
 	return nil
 }
 
-// EmailForUsername resolves any username, listed or not.
-func (d *DB) EmailForUsername(username string) (string, bool) {
+// UserIDForUsername resolves any username, listed or not.
+func (d *DB) UserIDForUsername(username string) (string, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	email, ok := d.usernames[normalizeUsername(username)]
-	return email, ok
+	uid, ok := d.usernames[normalizeUsername(username)]
+	return uid, ok
 }
 
 // SearchUsernames returns listed usernames starting with prefix.
@@ -117,8 +124,8 @@ func (d *DB) SearchUsernames(prefix string) []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	out := []string{}
-	for name, email := range d.usernames {
-		if strings.HasPrefix(name, prefix) && d.users[email].Listed {
+	for name, uid := range d.usernames {
+		if strings.HasPrefix(name, prefix) && d.users[uid].Listed {
 			out = append(out, name)
 		}
 	}
@@ -137,13 +144,13 @@ func (d *DB) AddInboxItem(item *InboxItem) {
 }
 
 // InboxFor returns a user's unexpired inbox items, newest first.
-func (d *DB) InboxFor(email string) []InboxItem {
+func (d *DB) InboxFor(userID string) []InboxItem {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := time.Now()
 	out := []InboxItem{}
 	for _, item := range d.inbox {
-		if item.RecipientEmail == email && now.Before(item.ExpiresAt) {
+		if item.RecipientID == userID && now.Before(item.ExpiresAt) {
 			out = append(out, *item)
 		}
 	}
@@ -174,12 +181,12 @@ func hashAPIToken(token string) string {
 }
 
 // CreateAPIToken returns the new token (shown to the user once) and its record.
-func (d *DB) CreateAPIToken(email, name string) (string, APIToken, error) {
+func (d *DB) CreateAPIToken(userID, name string) (string, APIToken, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	count := 0
 	for _, t := range d.tokens {
-		if t.Email == email {
+		if t.UserID == userID {
 			count++
 		}
 	}
@@ -187,18 +194,18 @@ func (d *DB) CreateAPIToken(email, name string) (string, APIToken, error) {
 		return "", APIToken{}, errTooManyTokens
 	}
 	token := apiTokenPrefix + generateToken(40)
-	rec := &APIToken{ID: generateToken(12), Email: email, Name: name, CreatedAt: time.Now()}
+	rec := &APIToken{ID: generateToken(12), UserID: userID, Name: name, CreatedAt: time.Now()}
 	d.tokens[hashAPIToken(token)] = rec
 	d.save()
 	return token, *rec, nil
 }
 
-func (d *DB) ListAPITokens(email string) []APIToken {
+func (d *DB) ListAPITokens(userID string) []APIToken {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	out := []APIToken{}
 	for _, t := range d.tokens {
-		if t.Email == email {
+		if t.UserID == userID {
 			out = append(out, *t)
 		}
 	}
@@ -206,11 +213,11 @@ func (d *DB) ListAPITokens(email string) []APIToken {
 	return out
 }
 
-func (d *DB) RevokeAPIToken(id, email string) bool {
+func (d *DB) RevokeAPIToken(id, userID string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for h, t := range d.tokens {
-		if t.ID == id && t.Email == email {
+		if t.ID == id && t.UserID == userID {
 			delete(d.tokens, h)
 			d.save()
 			return true
@@ -219,8 +226,8 @@ func (d *DB) RevokeAPIToken(id, email string) bool {
 	return false
 }
 
-// EmailForAPIToken authenticates a bearer token.
-func (d *DB) EmailForAPIToken(token string) (string, bool) {
+// UserIDForAPIToken authenticates a bearer token.
+func (d *DB) UserIDForAPIToken(token string) (string, bool) {
 	if !strings.HasPrefix(token, apiTokenPrefix) {
 		return "", false
 	}
@@ -235,7 +242,7 @@ func (d *DB) EmailForAPIToken(token string) (string, bool) {
 		t.LastUsed = time.Now()
 		d.save()
 	}
-	return t.Email, true
+	return t.UserID, true
 }
 
 // --- Handlers ---------------------------------------------------------------
@@ -243,27 +250,26 @@ func (d *DB) EmailForAPIToken(token string) (string, bool) {
 // requireUser writes 401 and returns false if the request isn't logged in
 // (by session cookie or API token).
 func (s *Server) requireUser(w http.ResponseWriter, req *http.Request) (string, bool) {
-	email, ok := s.getUserEmail(req)
+	userID, ok := s.getUserID(req)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 	}
-	return email, ok
+	return userID, ok
 }
 
 func profileJSON(u User) map[string]interface{} {
-	return map[string]interface{}{"email": u.Email, "username": u.Username, "listed": u.Listed}
+	return map[string]interface{}{"id": u.ID, "email": u.Email, "username": u.Username, "listed": u.Listed}
 }
 
 // profileHandler: GET returns the user's profile; POST {username, listed} updates it.
 func (s *Server) profileHandler(w http.ResponseWriter, req *http.Request) {
-	email, ok := s.requireUser(w, req)
+	userID, ok := s.requireUser(w, req)
 	if !ok {
 		return
 	}
 	switch req.Method {
 	case http.MethodGet:
-		u, _ := s.db.GetUser(email)
-		u.Email = email
+		u, _ := s.db.GetUser(userID)
 		writeJSON(w, http.StatusOK, profileJSON(u))
 	case http.MethodPost:
 		var body struct {
@@ -275,9 +281,9 @@ func (s *Server) profileHandler(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid request")
 			return
 		}
-		switch err := s.db.SetProfile(email, body.Username, body.Listed); err {
+		switch err := s.db.SetProfile(userID, body.Username, body.Listed); err {
 		case nil:
-			u, _ := s.db.GetUser(email)
+			u, _ := s.db.GetUser(userID)
 			writeJSON(w, http.StatusOK, profileJSON(u))
 		case errUsernameTaken:
 			writeError(w, http.StatusConflict, err.Error())
@@ -293,11 +299,11 @@ func (s *Server) profileHandler(w http.ResponseWriter, req *http.Request) {
 // with a minimum query length and rate limit so the directory can't simply
 // be dumped.
 func (s *Server) userSearchHandler(w http.ResponseWriter, req *http.Request) {
-	email, ok := s.requireUser(w, req)
+	userID, ok := s.requireUser(w, req)
 	if !ok {
 		return
 	}
-	if !s.directoryLimit.Allow(email, 1) {
+	if !s.directoryLimit.Allow(userID, 1) {
 		writeError(w, http.StatusTooManyRequests, "too many searches, try again later")
 		return
 	}
@@ -312,27 +318,27 @@ func (s *Server) userSearchHandler(w http.ResponseWriter, req *http.Request) {
 // userLookupHandler checks an exact username exists (listed or not), so the
 // sender can catch typos before uploading.
 func (s *Server) userLookupHandler(w http.ResponseWriter, req *http.Request) {
-	email, ok := s.requireUser(w, req)
+	userID, ok := s.requireUser(w, req)
 	if !ok {
 		return
 	}
-	if !s.directoryLimit.Allow(email, 1) {
+	if !s.directoryLimit.Allow(userID, 1) {
 		writeError(w, http.StatusTooManyRequests, "too many lookups, try again later")
 		return
 	}
-	_, exists := s.db.EmailForUsername(req.URL.Query().Get("username"))
+	_, exists := s.db.UserIDForUsername(req.URL.Query().Get("username"))
 	writeJSON(w, http.StatusOK, map[string]bool{"exists": exists})
 }
 
 // inboxHandler: GET lists the user's inbox; DELETE /api/inbox/{id} dismisses an item.
 func (s *Server) inboxHandler(w http.ResponseWriter, req *http.Request) {
-	email, ok := s.requireUser(w, req)
+	userID, ok := s.requireUser(w, req)
 	if !ok {
 		return
 	}
 	switch req.Method {
 	case http.MethodGet:
-		items := s.db.InboxFor(email)
+		items := s.db.InboxFor(userID)
 		// Drop items whose transfer is gone from the relay (received,
 		// cancelled from the CLI, or expired) rather than showing dead codes.
 		live := items[:0]
@@ -347,7 +353,7 @@ func (s *Server) inboxHandler(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"items": live})
 	case http.MethodDelete:
 		id := strings.TrimPrefix(req.URL.Path, "/api/inbox/")
-		n := s.db.DeleteInboxItems(func(i *InboxItem) bool { return i.ID == id && i.RecipientEmail == email })
+		n := s.db.DeleteInboxItems(func(i *InboxItem) bool { return i.ID == id && i.RecipientID == userID })
 		if n == 0 {
 			writeError(w, http.StatusNotFound, "not found")
 			return
@@ -365,7 +371,7 @@ func (s *Server) inboxReceivedHandler(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	email, ok := s.requireUser(w, req)
+	userID, ok := s.requireUser(w, req)
 	if !ok {
 		return
 	}
@@ -378,7 +384,7 @@ func (s *Server) inboxReceivedHandler(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 	n := s.db.DeleteInboxItems(func(i *InboxItem) bool {
-		return i.RecipientEmail == email && i.ManifestHash == body.ManifestHash
+		return i.RecipientID == userID && i.ManifestHash == body.ManifestHash
 	})
 	writeJSON(w, http.StatusOK, map[string]int{"removed": n})
 }
@@ -387,14 +393,14 @@ func (s *Server) inboxReceivedHandler(w http.ResponseWriter, req *http.Request) 
 // token is returned once), DELETE /api/tokens/{id} revokes. Requires a
 // browser session: an API token can't be used to mint more tokens.
 func (s *Server) tokensHandler(w http.ResponseWriter, req *http.Request) {
-	email, ok := s.sessionEmail(req)
+	userID, ok := s.sessionUserID(req)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "log in on the website to manage API tokens")
 		return
 	}
 	switch req.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]interface{}{"tokens": s.db.ListAPITokens(email)})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"tokens": s.db.ListAPITokens(userID)})
 	case http.MethodPost:
 		var body struct {
 			Name string `json:"name"`
@@ -405,14 +411,14 @@ func (s *Server) tokensHandler(w http.ResponseWriter, req *http.Request) {
 		if name == "" {
 			name = "CLI"
 		}
-		token, rec, err := s.db.CreateAPIToken(email, name)
+		token, rec, err := s.db.CreateAPIToken(userID, name)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"token": token, "id": rec.ID, "name": rec.Name})
 	case http.MethodDelete:
-		if !s.db.RevokeAPIToken(strings.TrimPrefix(req.URL.Path, "/api/tokens/"), email) {
+		if !s.db.RevokeAPIToken(strings.TrimPrefix(req.URL.Path, "/api/tokens/"), userID) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
@@ -430,7 +436,7 @@ func (s *Server) registerTransferHandler(w http.ResponseWriter, req *http.Reques
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	email, ok := s.requireUser(w, req)
+	userID, ok := s.requireUser(w, req)
 	if !ok {
 		return
 	}
@@ -458,7 +464,7 @@ func (s *Server) registerTransferHandler(w http.ResponseWriter, req *http.Reques
 	}
 	record := &TransferRecord{
 		ID:           generateToken(16),
-		SenderEmail:  email,
+		SenderID:     userID,
 		TransferName: truncate(body.TransferName, maxNameLength),
 		Message:      message,
 		Files:        body.Files,

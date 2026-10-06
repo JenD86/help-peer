@@ -182,6 +182,18 @@ func (e *testEnv) post(t *testing.T, path string, body interface{}, cookie strin
 	return resp
 }
 
+// sessionForEmail creates a user (if needed) and returns a session token.
+func (e *testEnv) sessionForEmail(email string) string {
+	u := e.s.db.GetOrCreateUserByEmail(email)
+	return e.s.db.CreateSession(u.ID)
+}
+
+// userIDForEmail returns the user ID for an email, creating the user if needed.
+func (e *testEnv) userIDForEmail(email string) string {
+	u := e.s.db.GetOrCreateUserByEmail(email)
+	return u.ID
+}
+
 func decode(t *testing.T, resp *http.Response, v interface{}) {
 	t.Helper()
 	defer resp.Body.Close()
@@ -213,7 +225,7 @@ func TestVerifyMagicLinkDoesNotDeadlock(t *testing.T) {
 	}
 
 	// The DB must still be usable afterwards.
-	if _, ok := e.s.db.GetSession(e.s.db.CreateSession("a@example.com")); !ok {
+	if _, ok := e.s.db.GetSession(e.sessionForEmail("a@example.com")); !ok {
 		t.Fatal("session not found")
 	}
 }
@@ -428,8 +440,8 @@ func TestManifestUploadHistoryAndNotify(t *testing.T) {
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
 
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
 	hash := strings.Repeat("12", 32)
 
 	var up map[string]string
@@ -487,12 +499,15 @@ func TestLegacyTransfersAreRekeyed(t *testing.T) {
 		[]byte(`{"orbit-velvet-zoom":{"code":"orbit-velvet-zoom","sender_email":"a@example.com"}}`), 0600)
 	os.WriteFile(filepath.Join(dir, "sessions.json"), []byte(`{"tok":"a@example.com"}`), 0600)
 
+	os.WriteFile(filepath.Join(dir, "users.json"),
+		[]byte(`{"a@example.com":{"email":"a@example.com","created_at":"2020-01-01T00:00:00Z"}}`), 0600)
 	db, _ := NewDB(dir)
 	data, _ := os.ReadFile(filepath.Join(dir, "transfers.json"))
 	if strings.Contains(string(data), "orbit-velvet-zoom") {
 		t.Fatalf("legacy code still on disk: %s", data)
 	}
-	if got := db.GetTransfersByEmail("a@example.com"); len(got) != 1 {
+	u, _ := db.GetUserByEmail("a@example.com")
+	if got := db.GetTransfersByUserID(u.ID); len(got) != 1 {
 		t.Fatalf("legacy record lost: %v", got)
 	}
 	if _, ok := db.GetSession("tok"); ok {
@@ -502,7 +517,7 @@ func TestLegacyTransfersAreRekeyed(t *testing.T) {
 
 func TestSessionsExpire(t *testing.T) {
 	e := newTestEnv(t)
-	tok := e.s.db.CreateSession("a@example.com")
+	tok := e.sessionForEmail("a@example.com")
 	e.s.db.mu.Lock()
 	e.s.db.sessions[tok].Expires = time.Now().Add(-time.Second)
 	e.s.db.mu.Unlock()
@@ -733,9 +748,9 @@ func (e *testEnv) do(t *testing.T, method, path string, body interface{}, sessio
 
 func TestProfileAndSearch(t *testing.T) {
 	e := newTestEnv(t)
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
-	carol := e.s.db.CreateSession("carol@example.com")
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
+	carol := e.sessionForEmail("carol@example.com")
 
 	if code, _ := e.do(t, "GET", "/api/profile", nil, "", ""); code != 401 {
 		t.Fatalf("anonymous profile: %d", code)
@@ -804,10 +819,10 @@ func TestSendToUsernameUsesInbox(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
-	e.s.db.SetProfile("alice@example.com", "alice", true)
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
+	e.s.db.SetProfile(e.userIDForEmail("alice@example.com"), "alice", true)
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 	hash := strings.Repeat("ab", 32)
 
 	if code, out := sendToUsers(t, e, alice, hash, []string{"@bob", "nobody"}); code != 400 || !strings.Contains(fmt.Sprint(out["error"]), "nobody") {
@@ -862,9 +877,9 @@ func TestInboxDropsGoneTransfers(t *testing.T) {
 	e := newTestEnv(t)
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 
 	received := strings.Repeat("a1", 32)
 	cancelled := strings.Repeat("b2", 32)
@@ -890,8 +905,8 @@ func TestInboxDropsGoneTransfers(t *testing.T) {
 
 func TestInboxItemsExpire(t *testing.T) {
 	e := newTestEnv(t)
-	e.s.db.AddInboxItem(&InboxItem{ID: "x", RecipientEmail: "bob@example.com", Code: "c", ExpiresAt: time.Now().Add(-time.Second)})
-	bob := e.s.db.CreateSession("bob@example.com") // triggers cleanup
+	e.s.db.AddInboxItem(&InboxItem{ID: "x", RecipientID: e.userIDForEmail("bob@example.com"), Code: "c", ExpiresAt: time.Now().Add(-time.Second)})
+	bob := e.sessionForEmail("bob@example.com") // triggers cleanup
 	if _, inbox := e.do(t, "GET", "/api/inbox", nil, bob, ""); len(inbox["items"].([]interface{})) != 0 {
 		t.Fatal("expired item shown")
 	}
@@ -904,7 +919,7 @@ func TestAPITokens(t *testing.T) {
 	e := newTestEnv(t)
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
-	alice := e.s.db.CreateSession("alice@example.com")
+	alice := e.sessionForEmail("alice@example.com")
 
 	code, out := e.do(t, "POST", "/api/tokens", map[string]string{"name": "laptop"}, alice, "")
 	token, _ := out["token"].(string)
@@ -934,7 +949,7 @@ func TestAPITokens(t *testing.T) {
 	if code != 200 || reg["transfer_id"] == "" {
 		t.Fatalf("register: %d %v", code, reg)
 	}
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 	if code, out := e.do(t, "POST", "/api/notify", map[string]interface{}{
 		"transfer_id": reg["transfer_id"], "manifest_hash": hash,
 		"code": "orbit-velvet-zoom-candle-harbor-ember", "recipients": []string{"bob"},
@@ -964,8 +979,8 @@ func TestCancelClearsInbox(t *testing.T) {
 	e := newTestEnv(t)
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
-	alice := e.s.db.CreateSession("alice@example.com")
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	alice := e.sessionForEmail("alice@example.com")
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 	hash := strings.Repeat("ee", 32)
 	ackSecret := bytes.Repeat([]byte{4}, 32)
 	ackSum := blake3.Sum256(ackSecret)
@@ -986,9 +1001,9 @@ func TestMessageReachesInboxAndEmails(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 
-	alice := e.s.db.CreateSession("alice@example.com")
-	bob := e.s.db.CreateSession("bob@example.com")
-	e.s.db.SetProfile("bob@example.com", "bob", false)
+	alice := e.sessionForEmail("alice@example.com")
+	bob := e.sessionForEmail("bob@example.com")
+	e.s.db.SetProfile(e.userIDForEmail("bob@example.com"), "bob", false)
 	hash := strings.Repeat("ab", 32)
 	e.relay.manifests[hash] = []byte("enc")
 
@@ -1037,5 +1052,465 @@ func TestEmailMessageBlock(t *testing.T) {
 	got := emailMessageBlock("alice", "line one\nline two")
 	if !strings.Contains(got, "Message from alice:") || !strings.Contains(got, "  > line one\n  > line two") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// loginByEmail creates (or finds) the account for an email through the normal
+// magic-link login and returns its ID.
+func loginByEmail(t *testing.T, db *DB, email string) string {
+	t.Helper()
+	link, err := db.CreateMagicLink(email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.VerifyMagicLink(link.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestLinkEmailRefusesAddressOwnedByAnotherAccount(t *testing.T) {
+	db, err := NewDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	victimID := loginByEmail(t, db, "victim@example.com")
+
+	// Someone with a username-only account asks to link the victim's address,
+	// in any letter case, and the victim opens the link.
+	attacker := db.CreateUser()
+	for _, addr := range []string{"victim@example.com", "Victim@Example.com"} {
+		link, err := db.CreateMagicLinkForUser(addr, attacker.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.VerifyMagicLink(link.Token); err != errEmailTaken {
+			t.Fatalf("linking %q: expected errEmailTaken, got %v", addr, err)
+		}
+	}
+
+	// The address still belongs to the victim, and the attacker gained nothing.
+	owner, _ := db.GetUserByEmail("victim@example.com")
+	if owner.ID != victimID {
+		t.Fatalf("owner of the email is %q, expected the victim %q", owner.ID, victimID)
+	}
+	if a, _ := db.GetUser(attacker.ID); a.Email != "" {
+		t.Fatalf("attacker account got the email %q", a.Email)
+	}
+	// The victim's next email login still lands in the victim's own account.
+	if again := loginByEmail(t, db, "victim@example.com"); again != victimID {
+		t.Fatalf("a later login went to %q instead of %q", again, victimID)
+	}
+	// The same must hold after a restart.
+	db2, _ := NewDB(db.dataDir)
+	if o, _ := db2.GetUserByEmail("victim@example.com"); o.ID != victimID {
+		t.Fatalf("after reload the owner is %q", o.ID)
+	}
+}
+
+func TestLinkEmailRejectedOverHTTP(t *testing.T) {
+	e := newTestEnv(t)
+	victimID := loginByEmail(t, e.s.db, "victim@example.com")
+	attacker := e.s.db.CreateUser()
+	link, _ := e.s.db.CreateMagicLinkForUser("victim@example.com", attacker.ID)
+
+	resp := e.post(t, "/api/auth/verify", map[string]string{"token": link.Token}, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+	if sessionFrom(resp) != "" {
+		t.Fatal("a rejected link must not create a session")
+	}
+	if o, _ := e.s.db.GetUserByEmail("victim@example.com"); o.ID != victimID {
+		t.Fatalf("the email moved to %q", o.ID)
+	}
+}
+
+func TestLinkEmailAllowsOwnAddressAndReplacesOldOne(t *testing.T) {
+	db, err := NewDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := db.CreateUser()
+
+	link := func(addr string) error {
+		l, _ := db.CreateMagicLinkForUser(addr, u.ID)
+		_, err := db.VerifyMagicLink(l.Token)
+		return err
+	}
+	if err := link("me@example.com"); err != nil {
+		t.Fatalf("first link: %v", err)
+	}
+	// Linking the address the account already owns is fine.
+	if err := link("ME@example.com"); err != nil {
+		t.Fatalf("relinking own address: %v", err)
+	}
+	// Changing to a new address frees the old one, even if it was stored
+	// with capital letters (accounts migrated from older versions).
+	db.mu.Lock()
+	db.users[u.ID].Email = "Me@Example.com"
+	db.mu.Unlock()
+	if err := link("new@example.com"); err != nil {
+		t.Fatalf("changing address: %v", err)
+	}
+	if _, ok := db.GetUserByEmail("me@example.com"); ok {
+		t.Fatal("the old address still resolves to an account")
+	}
+	if o, _ := db.GetUserByEmail("new@example.com"); o.ID != u.ID {
+		t.Fatalf("new address owned by %q", o.ID)
+	}
+}
+
+// sessionFrom returns the session cookie set by a response, if any.
+func sessionFrom(resp *http.Response) string {
+	for _, c := range resp.Cookies() {
+		if c.Name == "helppeer_session" && c.Value != "" {
+			return c.Value
+		}
+	}
+	return ""
+}
+
+func TestLinkEmailRequestAnswersWhenAddressIsInUse(t *testing.T) {
+	e := newTestEnv(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	victimID := loginByEmail(t, e.s.db, "victim@example.com")
+	asker := e.s.db.CreateUser()
+	session := e.s.db.CreateSession(asker.ID)
+	linksBefore := len(e.s.db.links)
+
+	request := func(addr string) (int, map[string]string) {
+		resp := e.post(t, "/api/auth/link-email", map[string]string{"email": addr}, session)
+		var out map[string]string
+		decode(t, resp, &out)
+		return resp.StatusCode, out
+	}
+
+	// An address owned by someone else is refused right away, in any letter
+	// case, and no link is created (so no email is sent).
+	for _, addr := range []string{"victim@example.com", "VICTIM@Example.com", "victim@example.com"} {
+		code, out := request(addr)
+		if code != http.StatusConflict || out["error"] != "That email address is already in use." {
+			t.Fatalf("%q: got %d %v", addr, code, out)
+		}
+	}
+	if len(e.s.db.links) != linksBefore {
+		t.Fatal("a refused request must not create a link")
+	}
+
+	// Those probes did not use up the owner's own login budget.
+	resp := e.post(t, "/api/auth/request", map[string]string{"email": "victim@example.com"}, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the owner's login request got %d after probes", resp.StatusCode)
+	}
+
+	// A free address still gets a link.
+	if code, out := request("free@example.com"); code != http.StatusOK || out["status"] != "sent" {
+		t.Fatalf("free address: got %d %v", code, out)
+	}
+
+	// An account's own address is answered without sending anything.
+	own := e.s.db.CreateUser()
+	if err := e.s.db.LinkEmail(own.ID, "mine@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	ownSession := e.s.db.CreateSession(own.ID)
+	before := len(e.s.db.links)
+	resp = e.post(t, "/api/auth/link-email", map[string]string{"email": "mine@example.com"}, ownSession)
+	var out map[string]string
+	decode(t, resp, &out)
+	if resp.StatusCode != http.StatusOK || out["status"] != "linked" || len(e.s.db.links) != before {
+		t.Fatalf("own address: got %d %v", resp.StatusCode, out)
+	}
+	_ = victimID
+}
+
+func TestLoadKeepsOneOwnerPerEmail(t *testing.T) {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	dir := t.TempDir()
+	users := `{
+	  "bbb": {"id":"bbb","email":"Shared@Example.com","created_at":"2026-02-01T00:00:00Z"},
+	  "aaa": {"id":"aaa","email":"shared@example.com","created_at":"2026-01-01T00:00:00Z"},
+	  "ccc": {"id":"ccc","email":"shared@example.com","created_at":"2026-03-01T00:00:00Z"},
+	  "ddd": {"id":"ddd","email":"other@example.com","created_at":"2026-03-01T00:00:00Z"}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "users.json"), []byte(users), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The oldest account owns the address after every restart.
+	for i := 0; i < 40; i++ {
+		db, _ := NewDB(dir)
+		if o, ok := db.GetUserByEmail("shared@example.com"); !ok || o.ID != "aaa" {
+			t.Fatalf("load %d: owner is %q", i, o.ID)
+		}
+		if b, _ := db.GetUser("bbb"); b.Email != "" {
+			t.Fatalf("load %d: the newer account still has an email: %q", i, b.Email)
+		}
+		if c, _ := db.GetUser("ccc"); c.Email != "" {
+			t.Fatalf("load %d: the newest account still has an email", i)
+		}
+		// Unrelated accounts are not touched.
+		if o, ok := db.GetUserByEmail("other@example.com"); !ok || o.ID != "ddd" {
+			t.Fatalf("load %d: the other account lost its email", i)
+		}
+	}
+}
+
+func TestLoadBreaksTiesByID(t *testing.T) {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	dir := t.TempDir()
+	users := `{
+	  "zzz": {"id":"zzz","email":"x@example.com","created_at":"2026-01-01T00:00:00Z"},
+	  "mmm": {"id":"mmm","email":"x@example.com","created_at":"2026-01-01T00:00:00Z"}
+	}`
+	os.WriteFile(filepath.Join(dir, "users.json"), []byte(users), 0600)
+	for i := 0; i < 20; i++ {
+		db, _ := NewDB(dir)
+		if o, _ := db.GetUserByEmail("x@example.com"); o.ID != "mmm" {
+			t.Fatalf("load %d: owner is %q", i, o.ID)
+		}
+	}
+}
+
+func TestRemoveEmailNeedsAUsername(t *testing.T) {
+	db, err := NewDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An email-only account cannot drop its only way to log in.
+	emailOnly := loginByEmail(t, db, "only@example.com")
+	if err := db.RemoveEmail(emailOnly); err != errNeedUsername {
+		t.Fatalf("expected errNeedUsername, got %v", err)
+	}
+	if o, _ := db.GetUserByEmail("only@example.com"); o.ID != emailOnly {
+		t.Fatal("the email was removed anyway")
+	}
+
+	// With a username it works, and the address is free afterwards.
+	if err := db.SetProfile(emailOnly, "someone", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RemoveEmail(emailOnly); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := db.GetUserByEmail("only@example.com"); ok {
+		t.Fatal("the address still resolves to an account")
+	}
+	if u, _ := db.GetUser(emailOnly); u.Email != "" || u.Username != "someone" {
+		t.Fatalf("account after removal: %+v", u)
+	}
+	// Removing again is harmless.
+	if err := db.RemoveEmail(emailOnly); err != nil {
+		t.Fatal(err)
+	}
+	// And it is saved.
+	db2, _ := NewDB(db.dataDir)
+	if _, ok := db2.GetUserByEmail("only@example.com"); ok {
+		t.Fatal("the removal was not saved")
+	}
+}
+
+func TestUnlinkEmailOverHTTP(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Not logged in.
+	resp := e.post(t, "/api/auth/unlink-email", map[string]string{}, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous: %d", resp.StatusCode)
+	}
+
+	// Email-only account: refused with a clear message.
+	emailOnly := loginByEmail(t, e.s.db, "only@example.com")
+	session := e.s.db.CreateSession(emailOnly)
+	resp = e.post(t, "/api/auth/unlink-email", map[string]string{}, session)
+	var out map[string]string
+	decode(t, resp, &out)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(out["error"], "username") {
+		t.Fatalf("email-only: %d %v", resp.StatusCode, out)
+	}
+
+	// With a username it works.
+	e.s.db.SetProfile(emailOnly, "someone", false)
+	resp = e.post(t, "/api/auth/unlink-email", map[string]string{}, session)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("with username: %d", resp.StatusCode)
+	}
+	if _, ok := e.s.db.GetUserByEmail("only@example.com"); ok {
+		t.Fatal("the address is still linked")
+	}
+}
+
+func TestChangeEmailKeepsTheOldOneUntilConfirmed(t *testing.T) {
+	e := newTestEnv(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	id := loginByEmail(t, e.s.db, "old@example.com")
+	e.s.db.SetProfile(id, "changer", false)
+	session := e.s.db.CreateSession(id)
+
+	resp := e.post(t, "/api/auth/link-email", map[string]string{"email": "new@example.com"}, session)
+	var out map[string]string
+	decode(t, resp, &out)
+	if resp.StatusCode != http.StatusOK || out["status"] != "sent" {
+		t.Fatalf("request: %d %v", resp.StatusCode, out)
+	}
+	// Nothing changes until the new address is confirmed.
+	if o, _ := e.s.db.GetUserByEmail("old@example.com"); o.ID != id {
+		t.Fatal("the old address was dropped before confirmation")
+	}
+	if _, ok := e.s.db.GetUserByEmail("new@example.com"); ok {
+		t.Fatal("the new address was linked before confirmation")
+	}
+
+	// Confirming switches the account to the new address and frees the old one.
+	var token string
+	e.s.db.mu.Lock()
+	for tok, l := range e.s.db.links {
+		if l.UserID == id && l.Email == "new@example.com" {
+			token = tok
+		}
+	}
+	e.s.db.mu.Unlock()
+	if token == "" {
+		t.Fatal("no confirmation link was created")
+	}
+	if _, err := e.s.db.VerifyMagicLink(token); err != nil {
+		t.Fatal(err)
+	}
+	if o, _ := e.s.db.GetUserByEmail("new@example.com"); o.ID != id {
+		t.Fatal("the new address is not linked")
+	}
+	if _, ok := e.s.db.GetUserByEmail("old@example.com"); ok {
+		t.Fatal("the old address still resolves to an account")
+	}
+}
+
+// postAs sends a JSON POST that appears to come from the given client address
+// (the server runs behind a proxy, so it reads X-Forwarded-For).
+func (e *testEnv) postAs(t *testing.T, ip, path string, body interface{}, session string) *http.Response {
+	t.Helper()
+	data, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+path, bytes.NewReader(data))
+	req.Header.Set("X-Forwarded-For", ip)
+	if session != "" {
+		req.AddCookie(&http.Cookie{Name: "helppeer_session", Value: session})
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp
+}
+
+// trustTheProxy makes the server use X-Forwarded-For for the test.
+func trustTheProxy(t *testing.T) {
+	t.Helper()
+	old := trustProxy
+	trustProxy = true
+	t.Cleanup(func() { trustProxy = old })
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+}
+
+func TestSignupsDoNotUseUpTheLoginBudget(t *testing.T) {
+	e := newTestEnv(t)
+	trustTheProxy(t)
+	const busy = "198.51.100.1"
+
+	for i := 1; i <= 10; i++ {
+		resp := e.postAs(t, busy, "/api/auth/signup", map[string]string{"username": fmt.Sprintf("user-%d", i)}, "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("signup %d: %d", i, resp.StatusCode)
+		}
+	}
+	if resp := e.postAs(t, busy, "/api/auth/signup", map[string]string{"username": "user-11"}, ""); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("the 11th signup from one client: %d", resp.StatusCode)
+	}
+	// That client can still ask for a login link, and another client can still sign up.
+	if resp := e.postAs(t, busy, "/api/auth/request", map[string]string{"email": "real.user@example.com"}, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login request after many signups: %d", resp.StatusCode)
+	}
+	if resp := e.postAs(t, "198.51.100.2", "/api/auth/signup", map[string]string{"username": "someone-else"}, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("signup from another client: %d", resp.StatusCode)
+	}
+}
+
+func TestSomeoneElseCannotLockYouOutOfLogin(t *testing.T) {
+	e := newTestEnv(t)
+	trustTheProxy(t)
+	victim := map[string]string{"email": "victim@example.com"}
+
+	for i := 0; i < 3; i++ {
+		if resp := e.postAs(t, "198.51.100.66", "/api/auth/request", victim, ""); resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: %d", i+1, resp.StatusCode)
+		}
+	}
+	if resp := e.postAs(t, "198.51.100.66", "/api/auth/request", victim, ""); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("the 4th request from the same client: %d", resp.StatusCode)
+	}
+	// The owner, from somewhere else, is not locked out.
+	if resp := e.postAs(t, "198.51.100.99", "/api/auth/request", victim, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the owner was locked out: %d", resp.StatusCode)
+	}
+}
+
+func TestOneAddressCannotBeFloodedFromManyClients(t *testing.T) {
+	e := newTestEnv(t)
+	trustTheProxy(t)
+	target := map[string]string{"email": "target@example.com"}
+
+	for i := 1; i <= 10; i++ {
+		ip := fmt.Sprintf("203.0.113.%d", i)
+		if resp := e.postAs(t, ip, "/api/auth/request", target, ""); resp.StatusCode != http.StatusOK {
+			t.Fatalf("client %d: %d", i, resp.StatusCode)
+		}
+	}
+	if resp := e.postAs(t, "203.0.113.11", "/api/auth/request", target, ""); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("the 11th client for one address: %d", resp.StatusCode)
+	}
+}
+
+func TestLinkEmailRequestsHaveTheirOwnBudgets(t *testing.T) {
+	e := newTestEnv(t)
+	trustTheProxy(t)
+	victimID := loginByEmail(t, e.s.db, "victim@example.com")
+	_ = victimID
+	asker := e.s.db.CreateUser()
+	session := e.s.db.CreateSession(asker.ID)
+	const ip = "192.0.2.10"
+	link := func(addr string) int {
+		return e.postAs(t, ip, "/api/auth/link-email", map[string]string{"email": addr}, session).StatusCode
+	}
+
+	// The same free address: 3 requests per client, then refused.
+	for i := 0; i < 3; i++ {
+		if code := link("free@example.com"); code != http.StatusOK {
+			t.Fatalf("request %d: %d", i+1, code)
+		}
+	}
+	if code := link("free@example.com"); code != http.StatusTooManyRequests {
+		t.Fatalf("the 4th request for one address: %d", code)
+	}
+	// A different address is still fine: 5 per account per hour, 4 used so far.
+	if code := link("other@example.com"); code != http.StatusOK {
+		t.Fatalf("another address: %d", code)
+	}
+	// The account has now used its 5 requests: even an address in use is refused.
+	if code := link("victim@example.com"); code != http.StatusTooManyRequests {
+		t.Fatalf("the 6th request from one account: %d", code)
+	}
+	// None of that used up the owner's login allowance.
+	if resp := e.postAs(t, "192.0.2.77", "/api/auth/request", map[string]string{"email": "victim@example.com"}, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the owner's login request: %d", resp.StatusCode)
 	}
 }

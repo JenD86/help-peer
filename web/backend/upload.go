@@ -210,10 +210,10 @@ func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request)
 	// Record the transfer in the sender's history. The code is never sent
 	// here, so the server can't decrypt the transfer.
 	resp := map[string]string{"status": "ok"}
-	if email, ok := s.getUserEmail(req); ok {
+	if userID, ok := s.getUserID(req); ok {
 		record := &TransferRecord{
 			ID:           generateToken(16),
-			SenderEmail:  email,
+			SenderID:     userID,
 			TransferName: truncate(body.TransferName, maxNameLength),
 			Message:      message,
 			Files:        body.Files,
