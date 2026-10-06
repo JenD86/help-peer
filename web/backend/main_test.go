@@ -158,6 +158,12 @@ func newTestEnv(t *testing.T, extraNodes ...StorageNode) *testEnv {
 
 var testDeleteTokenHash = strings.Repeat("de", 32)
 
+// uploadTicket returns a ticket big enough for any test segment, skipping the
+// per-hour and daily limits that the upload limit tests cover.
+func (e *testEnv) uploadTicket() string {
+	return e.s.tickets.Issue("test", 1<<40)
+}
+
 func (e *testEnv) post(t *testing.T, path string, body interface{}, cookie string) *http.Response {
 	t.Helper()
 	var r io.Reader
@@ -171,6 +177,7 @@ func (e *testEnv) post(t *testing.T, path string, body interface{}, cookie strin
 	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+path, r)
 	if path == "/api/upload/segment" {
 		req.Header.Set("X-Delete-Token-Hash", testDeleteTokenHash)
+		req.Header.Set("X-Upload-Ticket", e.uploadTicket())
 	}
 	if cookie != "" {
 		req.AddCookie(&http.Cookie{Name: "helppeer_session", Value: cookie})
@@ -537,6 +544,7 @@ func TestSPAFallback(t *testing.T) {
 func TestSegmentUploadRequiresDeleteToken(t *testing.T) {
 	e := newTestEnv(t)
 	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/api/upload/segment", bytes.NewReader(make([]byte, 100)))
+	req.Header.Set("X-Upload-Ticket", e.uploadTicket())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -657,6 +665,7 @@ func TestCancel(t *testing.T) {
 	rand.Read(segment)
 	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/api/upload/segment", bytes.NewReader(segment))
 	req.Header.Set("X-Delete-Token-Hash", hex.EncodeToString(tokenSum[:]))
+	req.Header.Set("X-Upload-Ticket", e.uploadTicket())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

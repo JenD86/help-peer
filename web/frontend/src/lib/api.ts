@@ -48,13 +48,40 @@ export async function logout(): Promise<void> {
 
 // Upload one encrypted segment; the server erasure-codes it and stores the
 // shards, registering deleteTokenHash so only manifest holders can delete them.
+// Announce a transfer of totalBytes (all encrypted segments added up). The
+// server answers with a ticket, or with the reason the upload is not allowed
+// now (too large, too many transfers this hour, daily allowance used up).
+export async function beginUpload(totalBytes: number): Promise<{ ticket: string }> {
+  return (await postJSON('/api/upload/begin', { total_bytes: totalBytes })).json()
+}
+
+// Close a transfer's ticket, finished or not, so what was reserved but not
+// used is given back. Best effort: failures are ignored.
+export async function finishUpload(ticket: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/upload/finish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket }),
+      keepalive: true,
+    })
+  } catch {
+    // nothing to do
+  }
+}
+
 export async function uploadSegment(
   encrypted: ArrayBuffer,
-  deleteTokenHash: string
+  deleteTokenHash: string,
+  ticket: string
 ): Promise<{ encrypted_size: number; shards: ShardInfo[] }> {
   const resp = await request('/api/upload/segment', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream', 'X-Delete-Token-Hash': deleteTokenHash },
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-Delete-Token-Hash': deleteTokenHash,
+      'X-Upload-Ticket': ticket,
+    },
     body: encrypted,
   })
   return resp.json()

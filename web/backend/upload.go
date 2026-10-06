@@ -50,6 +50,27 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Each segment is held in memory while it is erasure-coded, so a client
+	// may only have a few uploads running. Each segment must also carry the
+	// ticket the transfer was started with (see uploadtickets.go); that is
+	// where the size and daily allowance are checked, before any data is read.
+	key := limitKey(clientIP(req))
+	release, ok := s.acquireSegmentSlot(w, key)
+	if !ok {
+		return
+	}
+	defer release()
+	ticket, charged, ok := s.spendTicket(w, req)
+	if !ok {
+		return
+	}
+	stored := false // once shards are being stored the bytes stay used
+	defer func() {
+		if !stored {
+			s.tickets.Refund(ticket, charged)
+		}
+	}()
+
 	data, err := io.ReadAll(http.MaxBytesReader(w, req.Body, maxEncryptedSegment))
 	if err != nil {
 		if strings.Contains(err.Error(), "request body too large") {
@@ -83,6 +104,8 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusInternalServerError, "erasure coding error")
 		return
 	}
+
+	stored = true
 
 	// Upload the shards in parallel, spread over nodes with room for them
 	// (no more than two per volunteer network), moving a shard elsewhere if
