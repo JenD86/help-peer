@@ -9,6 +9,7 @@ import History from './pages/History'
 import Inbox from './pages/Inbox'
 import Account from './pages/Account'
 import { checkAuth, logout } from './lib/api'
+import ConsentBanner from './components/ConsentBanner'
 
 function NavBar() {
   const location = useLocation()
@@ -83,8 +84,12 @@ export default function App() {
         </Routes>
       </main>
       <footer className="bg-white border-t border-gray-200 px-6 py-4 text-center text-sm text-gray-400">
-        Help Peer — End-to-end encrypted file transfer
+        Help Peer — End-to-end encrypted file transfer ·{' '}
+        <button onClick={() => window.dispatchEvent(new Event('open-consent'))} className="hover:text-gray-600 underline">
+          Cookie settings
+        </button>
       </footer>
+      <ConsentBanner />
     </div>
   )
 }
