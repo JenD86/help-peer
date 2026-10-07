@@ -256,7 +256,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/sitemap.xml", s.sitemapHandler)
 
 	// Serve the frontend
-	mux.Handle("/", spaHandler(s.static))
+	mux.Handle("/", spaHandler(s.static, s.baseURL))
 	return mux
 }
 
@@ -264,21 +264,32 @@ func (s *Server) routes() http.Handler {
 // routes such as /verify?token=..., which have no file of their own. A missing
 // path with a file extension is a 404, so crawlers don't index the app shell
 // as /favicon.ico or /old.js.
-func spaHandler(static fs.FS) http.Handler {
+//
+// index.html is a template: link previews and canonical links need absolute
+// URLs, so {{SITE_URL}} becomes baseURL and {{PAGE_URL}} the page's own URL.
+func spaHandler(static fs.FS, baseURL string) http.Handler {
 	fileServer := http.FileServer(http.FS(static))
+	shell, _ := fs.ReadFile(static, "index.html")
+	site := html.EscapeString(baseURL)
+	shell = []byte(strings.ReplaceAll(string(shell), "{{SITE_URL}}", site))
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		name := strings.TrimPrefix(path.Clean(req.URL.Path), "/")
-		if name != "" {
-			if _, err := fs.Stat(static, name); err != nil {
-				if path.Ext(name) != "" {
-					http.NotFound(w, req)
-					return
-				}
-				req = req.Clone(req.Context())
-				req.URL.Path = "/"
+		if name != "" && name != "index.html" {
+			if _, err := fs.Stat(static, name); err == nil {
+				fileServer.ServeHTTP(w, req)
+				return
+			}
+			if path.Ext(name) != "" {
+				http.NotFound(w, req)
+				return
 			}
 		}
-		fileServer.ServeHTTP(w, req)
+		page := site + html.EscapeString(path.Clean("/"+name))
+		if name == "" || name == "index.html" {
+			page = site + "/"
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(strings.ReplaceAll(string(shell), "{{PAGE_URL}}", page)))
 	})
 }
 

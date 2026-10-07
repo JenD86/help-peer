@@ -50,7 +50,23 @@ function NavBar() {
   )
 }
 
+const TITLES: Record<string, string> = {
+  '/upload': 'Send Files',
+  '/download': 'Receive Files',
+  '/login': 'Log In',
+  '/verify': 'Logging In',
+  '/history': 'Transfer History',
+  '/inbox': 'Inbox',
+  '/account': 'Account',
+}
+
 export default function App() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    const title = TITLES[pathname]
+    document.title = title ? `${title} — Help Peer` : 'Help Peer — Send & Receive Files'
+  }, [pathname])
+
   return (
     <div className="min-h-screen flex flex-col">
       <NavBar />

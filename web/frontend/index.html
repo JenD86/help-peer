@@ -7,13 +7,22 @@
     <meta name="description" content="Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, no need to be online at the same time, and gone after 24 hours. Web, CLI and Python SDK." />
     <meta name="theme-color" content="#4f46e5" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- {{SITE_URL}} and {{PAGE_URL}} are filled in by the Go backend. -->
+    <link rel="canonical" href="{{PAGE_URL}}" />
     <link rel="alternate" type="text/plain" title="Guide for AI agents" href="/llms.txt" />
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Help Peer" />
+    <meta property="og:url" content="{{PAGE_URL}}" />
     <meta property="og:title" content="Help Peer — End-to-end encrypted file handoff" />
     <meta property="og:description" content="Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, gone after 24 hours." />
-    <meta name="twitter:card" content="summary" />
+    <meta property="og:image" content="{{SITE_URL}}/og-image.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Help Peer crest: a lion and a unicorn pass cubes between hands, over a landscape of castles linked by roads." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="{{SITE_URL}}/og-image.jpg" />
     <meta name="twitter:title" content="Help Peer — End-to-end encrypted file handoff" />
     <meta name="twitter:description" content="Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, gone after 24 hours." />
 
@@ -22,6 +31,8 @@
         "@context": "https://schema.org",
         "@type": "WebApplication",
         "name": "Help Peer",
+        "url": "{{SITE_URL}}/",
+        "image": "{{SITE_URL}}/crest-512.jpg",
         "description": "Asynchronous, end-to-end encrypted transfer of large files with a one-time code, for people and AI agents. Web app, command-line client and Python SDK.",
         "applicationCategory": "UtilitiesApplication",
         "operatingSystem": "Any",

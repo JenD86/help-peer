@@ -145,7 +145,7 @@ func newTestEnv(t *testing.T, extraNodes ...StorageNode) *testEnv {
 		t.Fatal(err)
 	}
 	static := fstest.MapFS{
-		"index.html":    {Data: []byte("<html>app shell</html>")},
+		"index.html":    {Data: []byte(`<html>app shell <link rel="canonical" href="{{PAGE_URL}}"> <meta content="{{SITE_URL}}/og.jpg"></html>`)},
 		"assets/app.js": {Data: []byte("console.log(1)")},
 	}
 	s := NewServer(db, relaySrv.URL,
@@ -538,6 +538,13 @@ func TestSPAFallback(t *testing.T) {
 	}
 	if code, _ := get("/api/nope"); code != 404 {
 		t.Errorf("/api/nope: %d", code)
+	}
+	if _, body := get("/download?code=x"); !strings.Contains(body, `href="https://helppeer.example.com/download"`) ||
+		!strings.Contains(body, `content="https://helppeer.example.com/og.jpg"`) {
+		t.Errorf("shell URLs not filled in: %q", body)
+	}
+	if _, body := get("/"); !strings.Contains(body, `href="https://helppeer.example.com/"`) {
+		t.Errorf("root canonical: %q", body)
 	}
 	if code, body := get("/favicon.ico"); code != 404 || strings.Contains(body, "app shell") {
 		t.Errorf("missing file: %d %q", code, body)
