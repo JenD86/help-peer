@@ -80,7 +80,7 @@ export default function Inbox() {
                 </div>
                 <div className="flex gap-3 shrink-0">
                   <button
-                    onClick={() => navigate(`/download?code=${encodeURIComponent(item.code)}`)}
+                    onClick={() => navigate('/download', { state: { code: item.code } })}
                     className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700"
                   >
                     Receive

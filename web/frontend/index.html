@@ -1,11 +1,27 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-1ZTKJQY0ME"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      // Report URLs without query strings: /download?code=... would hand
+      // Google the transfer's only key.
+      gtag('config', 'G-1ZTKJQY0ME', {
+        page_location: location.origin + location.pathname,
+        page_referrer: document.referrer.split(/[?#]/)[0],
+      });
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Help Peer — Send & Receive Files</title>
     <meta name="description" content="Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, no need to be online at the same time, and gone after 24 hours. Web, CLI and Python SDK." />
     <meta name="theme-color" content="#4f46e5" />
+    <!-- Other sites (Google included) get only the origin, never ?code=... -->
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <!-- {{SITE_URL}} and {{PAGE_URL}} are filled in by the Go backend. -->

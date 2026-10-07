@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import { deriveKeys, relayHash, decryptSegment, fileHasher } from '../lib/crypto'
 import { downloadManifest, downloadSegment, ackDownload, markReceived, type ShardInfo } from '../lib/api'
 
@@ -85,9 +85,15 @@ function checkManifest(m: Manifest) {
 }
 
 export default function Download() {
-  const [searchParams] = useSearchParams()
-  // Prefilled when coming from the inbox
-  const [code, setCode] = useState(searchParams.get('code') ?? '')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const location = useLocation()
+  // Prefilled when coming from the inbox (router state) or a ?code= link
+  const [code, setCode] = useState<string>(location.state?.code ?? searchParams.get('code') ?? '')
+  // The code is the only key to a transfer: keep it out of the address bar,
+  // browser history and the page URLs analytics reports.
+  useEffect(() => {
+    if (searchParams.has('code')) setSearchParams({}, { replace: true })
+  }, [searchParams, setSearchParams])
   const [status, setStatus] = useState<'idle' | 'opening' | 'ready' | 'downloading' | 'done'>('idle')
   const [opened, setOpened] = useState<Opened | null>(null)
   const [progress, setProgress] = useState('')
