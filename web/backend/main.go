@@ -4,6 +4,8 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -37,6 +39,7 @@ type Server struct {
 	nodes          *nodeRegistry
 	smtpConfig     *SMTPConfig
 	static         fs.FS
+	baseURL        string // public site URL, for robots.txt and sitemap.xml
 
 	manifestMisses  *rateLimiter // failed manifest lookups per client
 	manifestUploads *rateLimiter // manifest uploads per client
@@ -155,6 +158,7 @@ func NewServer(db *DB, relayURL string, nodes []StorageNode, smtp *SMTPConfig, b
 		nodes:           newNodeRegistry(nodes, dataDir, false),
 		smtpConfig:      smtp,
 		static:          static,
+		baseURL:         baseURL,
 		manifestMisses:  newRateLimiter("manifest-misses", 30, time.Minute),
 		manifestUploads: newRateLimiter("manifest-uploads", 30, time.Minute),
 		notifyLimit:     newRateLimiter("notify", 50, time.Hour),
@@ -247,25 +251,60 @@ func (s *Server) routes() http.Handler {
 		writeError(w, http.StatusNotFound, "not found")
 	})
 
+	// Generated rather than static so they name whichever host serves them.
+	mux.HandleFunc("/robots.txt", s.robotsHandler)
+	mux.HandleFunc("/sitemap.xml", s.sitemapHandler)
+
 	// Serve the frontend
 	mux.Handle("/", spaHandler(s.static))
 	return mux
 }
 
 // spaHandler serves static files, falling back to index.html for client-side
-// routes such as /verify?token=..., which have no file of their own.
+// routes such as /verify?token=..., which have no file of their own. A missing
+// path with a file extension is a 404, so crawlers don't index the app shell
+// as /favicon.ico or /old.js.
 func spaHandler(static fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(static))
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		name := strings.TrimPrefix(path.Clean(req.URL.Path), "/")
 		if name != "" {
 			if _, err := fs.Stat(static, name); err != nil {
+				if path.Ext(name) != "" {
+					http.NotFound(w, req)
+					return
+				}
 				req = req.Clone(req.Context())
 				req.URL.Path = "/"
 			}
 		}
 		fileServer.ServeHTTP(w, req)
 	})
+}
+
+func (s *Server) robotsHandler(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, `User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /account
+Disallow: /inbox
+Disallow: /history
+Disallow: /verify
+
+Sitemap: %s/sitemap.xml
+`, s.baseURL)
+}
+
+func (s *Server) sitemapHandler(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+`)
+	for _, p := range []string{"/", "/upload", "/download", "/llms.txt"} {
+		fmt.Fprintf(w, "  <url><loc>%s%s</loc></url>\n", html.EscapeString(s.baseURL), p)
+	}
+	io.WriteString(w, "</urlset>\n")
 }
 
 func (s *Server) healthHandler(w http.ResponseWriter, req *http.Request) {

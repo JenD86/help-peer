@@ -539,6 +539,27 @@ func TestSPAFallback(t *testing.T) {
 	if code, _ := get("/api/nope"); code != 404 {
 		t.Errorf("/api/nope: %d", code)
 	}
+	if code, body := get("/favicon.ico"); code != 404 || strings.Contains(body, "app shell") {
+		t.Errorf("missing file: %d %q", code, body)
+	}
+}
+
+func TestRobotsAndSitemapNameTheSite(t *testing.T) {
+	e := newTestEnv(t)
+	for path, want := range map[string]string{
+		"/robots.txt":  "Sitemap: https://helppeer.example.com/sitemap.xml",
+		"/sitemap.xml": "<loc>https://helppeer.example.com/upload</loc>",
+	} {
+		resp, err := http.Get(e.srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || !strings.Contains(string(body), want) {
+			t.Errorf("%s: %d %q", path, resp.StatusCode, body)
+		}
+	}
 }
 
 func TestSegmentUploadRequiresDeleteToken(t *testing.T) {

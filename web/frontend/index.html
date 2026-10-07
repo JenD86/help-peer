@@ -4,10 +4,55 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Help Peer — Send & Receive Files</title>
+    <meta name="description" content="Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, no need to be online at the same time, and gone after 24 hours. Web, CLI and Python SDK." />
+    <meta name="theme-color" content="#4f46e5" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate" type="text/plain" title="Guide for AI agents" href="/llms.txt" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Help Peer" />
+    <meta property="og:title" content="Help Peer — End-to-end encrypted file handoff" />
+    <meta property="og:description" content="Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, gone after 24 hours." />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Help Peer — End-to-end encrypted file handoff" />
+    <meta name="twitter:description" content="Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, gone after 24 hours." />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "Help Peer",
+        "description": "Asynchronous, end-to-end encrypted transfer of large files with a one-time code, for people and AI agents. Web app, command-line client and Python SDK.",
+        "applicationCategory": "UtilitiesApplication",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "sameAs": ["https://github.com/JenD86/help-peer"]
+      }
+    </script>
   </head>
   <body class="bg-gray-50">
-    <div id="root"></div>
+    <div id="root">
+      <!-- Shown to crawlers that don't run JavaScript; React replaces it on load. -->
+      <main style="max-width: 42rem; margin: 4rem auto; padding: 0 1.5rem; font-family: system-ui, sans-serif">
+        <h1>Help Peer: hand off large files, end-to-end encrypted</h1>
+        <p>
+          Send large files to a person or an agent with a one-time code: model weights, datasets, tarballs, anything
+          except images, video and audio. The sender can go offline straight away; the files wait, end-to-end
+          encrypted, for up to 24 hours.
+        </p>
+        <ul>
+          <li>Zero-knowledge: files are encrypted before they leave your machine.</li>
+          <li>Built for agents: a CLI and Python SDK with JSON output and resumable, verified downloads.</li>
+          <li>Resilient: each piece is split into 12 shards across storage nodes; any 8 rebuild it.</li>
+        </ul>
+        <p>
+          <a href="/upload">Send files</a> · <a href="/download">Receive files</a> ·
+          <a href="/llms.txt">Guide for AI agents</a> ·
+          <a href="https://github.com/JenD86/help-peer">Source on GitHub</a>
+        </p>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
