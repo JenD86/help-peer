@@ -38,7 +38,7 @@ interface DirHandle {
   getFileHandle(name: string, opts: { create: boolean }): Promise<{ createWritable(): Promise<FileWritable> }>
 }
 const pickDirectory = (window as any).showDirectoryPicker as
-  | ((opts: { mode: 'readwrite' }) => Promise<DirHandle>)
+  | ((opts: { mode: 'readwrite'; startIn?: 'downloads' }) => Promise<DirHandle>)
   | undefined
 
 // The manifest comes from the sender: split its path and reject anything
@@ -136,7 +136,9 @@ export default function Download() {
     let dir: DirHandle | null = null
     if (pickDirectory) {
       try {
-        dir = await pickDirectory({ mode: 'readwrite' })
+        // Chromium browsers refuse Downloads itself (only its subfolders), so open
+        // there to make creating a new folder one click away.
+        dir = await pickDirectory({ mode: 'readwrite', startIn: 'downloads' })
       } catch (err: any) {
         if (err?.name === 'AbortError') return // user cancelled
       }
@@ -238,7 +240,7 @@ export default function Download() {
       <p className="text-gray-600 mb-8">
         Enter the transfer code you received to see what's in it.
         {pickDirectory
-          ? " When you download, you'll be asked for a folder to save into."
+          ? " When you download, you'll be asked for a folder to save into. Pick or create a subfolder: many browsers won't let sites save directly into Downloads, Desktop or your home folder."
           : ' Files are assembled in memory, so for very large transfers use the command-line client.'}
       </p>
 
