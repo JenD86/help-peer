@@ -1,37 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <!-- Google tag (gtag.js), loaded only after the visitor accepts
-         analytics cookies (see src/components/ConsentBanner.tsx). -->
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('consent', 'default', {
-        analytics_storage: 'denied',
-        ad_storage: 'denied',
-        ad_user_data: 'denied',
-        ad_personalization: 'denied',
-      });
-      window.loadAnalytics = function () {
-        if (window.analyticsLoaded) return;
-        window.analyticsLoaded = true;
-        gtag('consent', 'update', { analytics_storage: 'granted' });
-        var s = document.createElement('script');
-        s.async = true;
-        s.src = 'https://www.googletagmanager.com/gtag/js?id=G-1ZTKJQY0ME';
-        document.head.appendChild(s);
-        gtag('js', new Date());
-        // Report URLs without query strings: /download?code=... would hand
-        // Google the transfer's only key.
-        gtag('config', 'G-1ZTKJQY0ME', {
-          page_location: location.origin + location.pathname,
-          page_referrer: document.referrer.split(/[?#]/)[0],
-        });
-      };
-      try {
-        if (localStorage.getItem('analytics-consent') === 'granted') window.loadAnalytics();
-      } catch (e) {}
-    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Help Peer — Send & Receive Files</title>
