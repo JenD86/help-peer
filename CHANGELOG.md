@@ -2,13 +2,15 @@
 
 Notable changes to Help Peer. Entries marked **Action required** need storage node operators or users to update.
 
-## Unreleased
+## 2026-10-13 — Python SDK 0.2.1 and CLI
 
-### CLI and Python SDK: receivers could be made to request internal addresses
+### CLI and Python SDK: receivers could be made to request internal addresses — **Action required: update the CLI and SDK**
 
 A transfer's manifest names the storage nodes its shards are on, and receivers fetched from whatever URLs it listed. A malicious sender (or, for transfers sent to a username, the website) could make a receiver's client send requests to its own network, such as `localhost` services, the router or a cloud metadata endpoint. The client never saw the responses unless they matched a shard's hash, but the requests themselves could have side effects.
 
 Receivers (`receive` and `cancel`) now only contact a storage node if the receiver configured it (`--nodes`, `HELPEER_STORAGE_NODES` or the logged-in site's list) or it resolves to a public address, checked at connection time. Shard requests no longer follow redirects or go through proxies, and downloads stop once they exceed the size the manifest says to expect. The web app was not affected: its backend already only fetches from its own registered nodes.
+
+To update: `pip install --upgrade "helppeer>=0.2.1"` for the Python SDK, or `git pull && cargo install --path client` for the Rust CLI.
 
 If you receive from storage nodes on a private network, list them in `--nodes` or `HELPEER_STORAGE_NODES`.
 
