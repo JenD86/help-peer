@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+import io
 import os
 import secrets
 import sys
@@ -460,7 +461,7 @@ class _ShardUploader:
             node = self.nodes[i]
             try:
                 resp = session.put(
-                    f"{node}/shard/{h}", data=data, timeout=TIMEOUT,
+                    f"{node}/shard/{h}", data=_streamed(data), timeout=TIMEOUT,
                     headers={
                         "Content-Type": "application/octet-stream",
                         "X-Delete-Token-Hash": token_hash,
@@ -476,12 +477,20 @@ class _ShardUploader:
         raise last_err
 
 
+def _streamed(data: bytes) -> io.BytesIO:
+    """A request body urllib3 sends in small blocks. Given plain bytes it sends
+    them in one sendall() under the 10-second connect timeout, so a shard that
+    takes longer to upload (12 at once on an ordinary uplink) fails; in blocks,
+    the timeout applies to each block instead. Seekable, so retries rewind it."""
+    return io.BytesIO(data)
+
+
 def _upload_manifest(
     session: requests.Session, relay_url: str, r_hash: str, data: bytes, ack_hash: str,
 ) -> None:
     """Upload encrypted manifest to relay."""
     resp = session.put(
-        f"{relay_url}/manifest/{r_hash}", data=data, timeout=TIMEOUT,
+        f"{relay_url}/manifest/{r_hash}", data=_streamed(data), timeout=TIMEOUT,
         headers={"Content-Type": "application/octet-stream", "X-Ack-Hash": ack_hash},
     )
     if resp.status_code not in (200, 201):

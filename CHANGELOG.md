@@ -2,6 +2,14 @@
 
 Notable changes to Help Peer. Entries marked **Action required** need storage node operators or users to update.
 
+## 2026-10-13 — Python SDK 0.3.1
+
+To update: `pip install --upgrade "helppeer>=0.3.1"`.
+
+### Python SDK: uploads failed on ordinary connections
+
+`send` failed with "The write operation timed out" whenever a shard took more than 10 seconds to upload, which is common with 12 shards sharing a home or office uplink. The HTTP library applied the 10-second connect timeout to sending each whole shard. Uploads are now streamed in small blocks, so the timeout applies per block. The bug was present in every earlier SDK release; the Rust CLI and web app were not affected.
+
 ## 2026-10-13 — Python SDK 0.3.0 and CLI
 
 To update: `pip install --upgrade "helppeer>=0.3.0"` for the Python SDK, or `git pull && cargo install --path client` for the Rust CLI. The web and relay changes below are live on help-peer.org.

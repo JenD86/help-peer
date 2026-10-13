@@ -588,3 +588,37 @@ class TestShardDeleteTokens:
         a, b = client._shard_delete_token(m2, "ab" * 32), client._shard_delete_token(m2, "cd" * 32)
         assert a != b and a != m2.delete_token
         assert a == crypto.shard_token(crypto.shard_delete_key(m2.delete_token), "ab" * 32)
+
+
+
+class TestSlowUploads:
+    def test_upload_slower_than_connect_timeout(self, monkeypatch):
+        """A body that takes longer to send than the connect timeout must still
+        upload: the timeout applies per block, not to the whole body."""
+        import threading, time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class SlowReader(BaseHTTPRequestHandler):
+            def do_PUT(self):
+                left = int(self.headers["Content-Length"])
+                while left:  # read about 4 MB/s
+                    chunk = self.rfile.read(min(left, 256 * 1024))
+                    left -= len(chunk)
+                    time.sleep(0.06)
+                self.send_response(201)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowReader)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        node = f"http://127.0.0.1:{server.server_port}"
+        monkeypatch.setattr(client, "TIMEOUT", (0.3, 30))
+        try:
+            data = os.urandom(8 * 1024 * 1024)  # ~2 s to read, far more than 0.3 s
+            uploader = client._ShardUploader([node], crypto.shard_delete_key("ab" * 32))
+            shard = uploader.upload(client._session(), 0, data)
+            assert shard.node == node
+        finally:
+            server.shutdown()
