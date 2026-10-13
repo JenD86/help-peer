@@ -2,6 +2,16 @@
 
 Notable changes to Help Peer. Entries marked **Action required** need storage node operators or users to update.
 
+## Unreleased
+
+### Python SDK: fewer dependencies
+
+`reedsolo` (never imported) and `hkdf` (unmaintained since 2015) are no longer dependencies; key derivation uses the HKDF from `cryptography`, which the SDK already required. Keys are unchanged, as the shared test vectors confirm.
+
+### Documentation
+
+- README: a "Public Deployment" section on putting the services behind HTTPS, with a Caddy example.
+
 ## 2026-10-13 — Python SDK 0.2.2, CLI and web
 
 To update: `pip install --upgrade "helppeer>=0.2.2"` for the Python SDK, or `git pull && cargo install --path client` for the Rust CLI. The web changes are live on help-peer.org; self-hosters update by pulling and rebuilding.

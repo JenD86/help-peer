@@ -2,11 +2,11 @@
 from __future__ import annotations
 import os
 import re
-import hashlib
 
-import hkdf
 from argon2.low_level import Type, hash_secret_raw
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 NONCE_SIZE = 12
 KEY_SIZE = 32
@@ -26,6 +26,12 @@ ARGON2_ITERATIONS = 3
 ARGON2_PARALLELISM = 1
 
 
+def _hkdf(secret: bytes, info: bytes) -> bytes:
+    """HKDF-SHA256 with no salt (RFC 5869: a zero-filled salt), as the Rust
+    client and web app use."""
+    return HKDF(algorithm=SHA256(), length=KEY_SIZE, salt=None, info=info).derive(secret)
+
+
 def derive_keys(code: str) -> tuple[bytes, bytes]:
     """Derive K_data and K_index from a transfer code.
 
@@ -41,8 +47,8 @@ def derive_keys(code: str) -> tuple[bytes, bytes]:
         hash_len=KEY_SIZE,
         type=Type.ID,
     )
-    k_data = hkdf.Hkdf(None, secret, hashlib.sha256).expand(b"help-peer-data-key", KEY_SIZE)
-    k_index = hkdf.Hkdf(None, secret, hashlib.sha256).expand(b"help-peer-index-key", KEY_SIZE)
+    k_data = _hkdf(secret, b"help-peer-data-key")
+    k_index = _hkdf(secret, b"help-peer-index-key")
     return k_data, k_index
 
 

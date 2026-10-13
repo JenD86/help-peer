@@ -175,6 +175,29 @@ STORAGE_BACKEND=s3 S3_BUCKET=my-bucket S3_ACCESS_KEY=... S3_SECRET_KEY=... \
   ./storage-node/storage-node
 ```
 
+### Public Deployment: Put HTTPS in Front
+
+The relay, storage node and web backend all speak plain HTTP and expect a TLS-terminating reverse proxy on any public server. Without one, the secrets that travel in requests are readable on the network: login sessions and API tokens, download confirmations (`ack_secret`), delete tokens, and codes sent for email delivery. Transfer contents are encrypted either way.
+
+1. **Give each public service an HTTPS name**, e.g. `help.example.com` (web), `relay.example.com` and `node.example.com`, and point the proxy at them. With [Caddy](https://caddyserver.com), which gets certificates automatically, the whole `Caddyfile` is:
+
+   ```
+   help.example.com {
+       reverse_proxy 127.0.0.1:8080
+       header Strict-Transport-Security "max-age=31536000"
+   }
+   relay.example.com {
+       reverse_proxy 127.0.0.1:7000
+   }
+   node.example.com {
+       reverse_proxy 127.0.0.1:7001
+   }
+   ```
+
+   nginx, or NGINX Proxy Manager, works the same way; raise `client_max_body_size` to at least `100m`, since web uploads send 64 MB segments, and enable HSTS on the web host.
+2. **Keep the services off the public internet**: publish their ports on `127.0.0.1` only (e.g. `127.0.0.1:8080:8080` in `docker-compose.yml`), or firewall them, so nobody can bypass the proxy over plain HTTP.
+3. **Tell the services their public URLs** in `.env`: `WEB_BASE_URL=https://help.example.com`, `RELAY_URL_PUBLIC=https://relay.example.com` and `STORAGE_NODES_PUBLIC=https://node.example.com`, so login links, manifests and `/api/config` use HTTPS. Set `WEB_TRUST_PROXY=1` so the web backend rate-limits real client addresses.
+
 ### Transfer Files
 
 **Rust CLI:**
@@ -292,7 +315,7 @@ If a node fails while sending, its shards are stored on the remaining nodes inst
 
 ### Contributing a node
 
-1. **Find a machine** with a public address, spare disk and decent upload bandwidth. Put the node behind HTTPS (for example a Caddy or nginx reverse proxy in front of port 7001).
+1. **Find a machine** with a public address, spare disk and decent upload bandwidth. Put the node behind HTTPS (a Caddy or nginx reverse proxy in front of port 7001; see [Public Deployment](#public-deployment-put-https-in-front)).
 2. **Run it** — e.g. with 100 GB of capacity, auto-registering with a Help Peer site:
    ```bash
    docker run -d --restart unless-stopped -p 7001:7001 -v helppeer-shards:/data \
