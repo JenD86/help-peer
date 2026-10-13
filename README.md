@@ -197,6 +197,14 @@ The relay, storage node and web backend all speak plain HTTP and expect a TLS-te
    nginx, or NGINX Proxy Manager, works the same way; raise `client_max_body_size` to at least `100m`, since web uploads send 64 MB segments, and enable HSTS on the web host.
 2. **Keep the services off the public internet**, so nobody can bypass the proxy over plain HTTP. `docker-compose.yml` publishes their ports on `127.0.0.1` only, which suits a proxy running directly on the host, like the Caddy example. **If the proxy runs in Docker itself, as NGINX Proxy Manager does, it can't reach those ports**: `127.0.0.1` inside its container is the container, not the host, and every request gets a 502. Instead, attach the proxy's container to the `proxy` network the compose file creates (`docker network connect proxy <proxy container>`) and point it at `help-peer-web:8080`, `help-peer-relay:7000` and `help-peer-node:7001`. Don't rely on a host firewall such as ufw for this: Docker's published ports bypass it.
 3. **Tell the services their public URLs** in `.env`: `WEB_BASE_URL=https://help.example.com`, `RELAY_URL_PUBLIC=https://relay.example.com` and `STORAGE_NODES_PUBLIC=https://node.example.com`, so login links, manifests and `/api/config` use HTTPS. Set `WEB_TRUST_PROXY=1` and `RELAY_TRUST_PROXY=1` so the web backend and relay rate-limit real client addresses rather than the proxy's (only once step 2 is done).
+4. **Deploy with the commit**, so `/api/version` reports which commit is running and `scripts/verify-web.sh` can check the site against it:
+
+   ```bash
+   git pull
+   GIT_COMMIT=$(git rev-parse HEAD) docker compose up -d --build
+   ```
+
+   The deploy workflow (`.github/workflows/deploy.yml`) already does this. A build without `GIT_COMMIT` reports `"unknown"` and fails the check.
 
 ### Transfer Files
 
@@ -391,7 +399,7 @@ The CLI and SDK spread shards round-robin over the list from `/api/config`, so t
 - **Rate limiting**: The relay and web backend throttle clients that make repeated failed manifest lookups (code guessing) and limit manifest uploads per client; the relay also caps its total storage. The web backend limits login and notification emails. Limits are saved to `ratelimits.json` in each service's data directory (every 10 seconds and on shutdown), so restarting doesn't reset them
 - **TTL expiry**: Shards and manifests auto-expire after 24 hours, including across restarts
 - **Web trust model**: The web backend serves the page that does the encryption, so web users trust the server operator not to tamper with it
-- **Checking the web app**: `index.html` pins its script and stylesheet with Subresource Integrity, and `/api/version` reports the deployed commit. `scripts/verify-web.sh https://help-peer.org` builds that commit in Docker and compares it with what the site serves (needs `curl`, `git` and `docker`; exit code 0 means a match). This catches a site that serves everyone something other than the repo; it can't catch a page changed for one targeted visitor, so use the CLI when that matters
+- **Checking the web app**: `index.html` pins its script and stylesheet with Subresource Integrity, and `/api/version` reports the deployed commit. `scripts/verify-web.sh https://help-peer.org` builds that commit in Docker and compares it with what the site serves (needs `curl`, `git` and `docker`; exit code 0 means a match). A [GitHub Action](https://github.com/JenD86/help-peer/actions/workflows/verify-web.yml) runs it against help-peer.org every hour and after each deploy, and its run history is the public record. This catches a site that serves everyone something other than the repo; it can't catch a page changed for one targeted visitor, so use the CLI when that matters
 - **Browser security headers**: The web app is served with a strict Content-Security-Policy (only this site's own scripts, styles and API; WebAssembly allowed for Argon2id, but no `eval` or inline scripts), and refuses to be framed. This blocks injected or third-party scripts; it doesn't protect against the operator, who serves the page
 - **Who sees the code**: The code is generated on the sender's machine and only reaches the web server when you ask it to deliver the code to recipients. Sending to a username (from the web or with `--to`) stores the code in the recipient's inbox until the transfer is received or expires; sending to an email address passes the code through the server and into the email. In both cases the server operator, and for email the mail providers, could decrypt that transfer. Codes you share yourself never reach the server. See the [privacy note](#usernames-directory-and-inbox)
 
@@ -581,6 +589,33 @@ diff -r /tmp/test-model /tmp/received
 python -c "import helppeer; r = helppeer.send('/tmp/test-model', return_details=True); helppeer.receive(r['code'], '/tmp/received-py')"
 diff -r /tmp/test-model /tmp/received-py
 ```
+
+## Updating Base Images
+
+The Dockerfiles pin every base image by digest (`image:tag@sha256:…`), so the same commit always builds from the same images. Pinned images don't pick up security fixes by themselves, so Dependabot (`.github/dependabot.yml`) opens a pull request each week with new digests and versions, and another for the GitHub Actions the workflows use. CI doesn't run the Go tests, so before merging a base-image pull request run step 3 below on its branch.
+
+To update by hand, for example after a security release:
+
+1. Get the current digest of each image:
+
+   ```bash
+   docker buildx imagetools inspect golang:1.27-alpine3.24 | grep -m1 Digest
+   docker buildx imagetools inspect node:24-alpine3.24 | grep -m1 Digest
+   docker buildx imagetools inspect alpine:3.24 | grep -m1 Digest
+   ```
+
+2. Replace the old `sha256:…` values in `relay/Dockerfile`, `storage-node/Dockerfile` and `web/Dockerfile` (the Go and Alpine images appear in all three, Node only in `web/`). To move to a new version, such as Go 1.28 or Alpine 3.25, change the tag as well and use that tag's digest.
+3. Run the Go tests with the new Go image, then rebuild and check the stack:
+
+   ```bash
+   for m in relay storage-node web/backend; do
+     docker run --rm -v "$PWD/$m":/src -w /src golang:1.27-alpine3.24 go test ./...
+   done
+   docker compose build --pull && docker compose up -d
+   ```
+
+   Then upload and download a file in the web UI.
+4. Open a pull request. The "Reproducible web build" check must pass. After the deploy, `scripts/verify-web.sh https://help-peer.org` should report `MATCH`.
 
 ## Roadmap
 
