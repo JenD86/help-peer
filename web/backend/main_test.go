@@ -225,8 +225,14 @@ func TestVerifyMagicLinkDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+func withLogSecrets(t *testing.T) {
+	logSecrets = true
+	t.Cleanup(func() { logSecrets = false })
+}
+
 func TestMagicLinkUsesConfiguredBaseURL(t *testing.T) {
 	e := newTestEnv(t)
+	withLogSecrets(t)
 
 	// With SMTP unset the handler logs the link instead of emailing it.
 	var logs bytes.Buffer
@@ -864,6 +870,7 @@ func sendToUsers(t *testing.T, e *testEnv, sender, hash string, recipients []str
 
 func TestSendToUsernameUsesInbox(t *testing.T) {
 	e := newTestEnv(t)
+	withLogSecrets(t)
 	var logs bytes.Buffer
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
@@ -1046,6 +1053,7 @@ func TestCancelClearsInbox(t *testing.T) {
 
 func TestMessageReachesInboxAndEmails(t *testing.T) {
 	e := newTestEnv(t)
+	withLogSecrets(t)
 	var logs bytes.Buffer
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
@@ -1091,6 +1099,44 @@ func TestMessageReachesInboxAndEmails(t *testing.T) {
 		if !strings.Contains(logs.String(), who) || !strings.Contains(logs.String(), `Fine-tuned on run 42.\nUse tokenizer v3.`) {
 			t.Fatalf("%s missing message in logs: %s", who, logs.String())
 		}
+	}
+}
+
+func TestDevLogsWithholdSecretsByDefault(t *testing.T) {
+	e := newTestEnv(t)
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/request", strings.NewReader(`{"email":"a@example.com"}`))
+	w := httptest.NewRecorder()
+	e.s.auth.authRequestHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login request: %d", w.Code)
+	}
+
+	alice := e.s.db.CreateSession("alice@example.com")
+	e.s.db.SetProfile("alice@example.com", "alice", true)
+	e.s.db.SetProfile("bob@example.com", "bob", true)
+	e.relay.manifests[strings.Repeat("ab", 32)] = []byte("enc")
+	_, up := e.do(t, "POST", "/api/upload/manifest", map[string]interface{}{
+		"manifest_hash": strings.Repeat("cd", 32), "manifest_data": []byte("x"), "ack_hash": strings.Repeat("ac", 32),
+		"transfer_name": "weights", "message": "secret note",
+	}, alice, "")
+	if code, out := e.do(t, "POST", "/api/notify", map[string]interface{}{
+		"transfer_id": up["transfer_id"], "manifest_hash": strings.Repeat("ab", 32),
+		"code": "orbit-velvet-zoom-candle-harbor-ember", "recipients": []string{"bob", "carol@example.com"},
+	}, alice, ""); code != 200 {
+		t.Fatalf("notify: %d %v", code, out)
+	}
+
+	for _, secret := range []string{"token=", "orbit", "ember", "secret note"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("log contains %q:\n%s", secret, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "WEB_DEV_LOG_SECRETS=1") {
+		t.Errorf("log doesn't say how to see login links: %s", logs.String())
 	}
 }
 

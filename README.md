@@ -136,7 +136,7 @@ docker compose up -d
 # Web UI on :8080, relay on :7000, storage node on :7001
 ```
 
-Without SMTP settings the web backend runs in dev mode and logs login links and notification emails instead of sending them. For a public deployment set `WEB_BASE_URL` in `.env` to the URL users visit.
+Without SMTP settings the web backend runs in dev mode and doesn't send email. To log in locally, also set `WEB_DEV_LOG_SECRETS=1`: login links, and the codes and messages notification emails would carry, are then written to the log. Leave it off anywhere else, since anyone who can read the logs could use them. For a public deployment set `WEB_BASE_URL` in `.env` to the URL users visit.
 
 **Option 2: Docker (individual containers)**
 ```bash
@@ -446,6 +446,7 @@ The Python CLI takes the same `--relay`, `--nodes` and `--json` flags as the Rus
 | `SEGMENT_MAX_CONCURRENT` | `8` | Segments being uploaded at once across all clients (each is held in memory while it is erasure-coded) |
 | `WEB_BASE_URL` | `http://localhost:{WEB_PORT}` | Public URL used in login emails. **Required when SMTP is configured** |
 | `WEB_DATA_DIR` | `/tmp/helppeer-web` | Data directory for user DB |
+| `WEB_DEV_LOG_SECRETS` | off | Set to `1` for local testing without SMTP: logs login links, transfer codes and messages instead of emailing them |
 | `SMTP_HOST` | — | SMTP server hostname (e.g. `smtp.gmail.com`) |
 | `SMTP_PORT` | — | SMTP port (`465` for TLS, `587` for STARTTLS) |
 | `SMTP_USER` | — | SMTP username (e.g. your Gmail address) |

@@ -139,7 +139,11 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 		})
 		inboxed++
 		if s.smtpConfig.Host == "" {
-			log.Printf("[DEV] Inbox alert to %s (@%s): transfer '%s' from %s, message: %q", email, name, record.TransferName, senderName, record.Message)
+			if logSecrets {
+				log.Printf("[DEV] Inbox alert to %s (@%s): transfer '%s' from %s, message: %q", email, name, record.TransferName, senderName, record.Message)
+			} else {
+				log.Printf("SMTP not configured: inbox alert to @%s not emailed (the transfer is in their inbox)", name)
+			}
 			continue
 		}
 		if err := sendInboxAlertEmail(s.smtpConfig, email, s.auth.baseURL, senderName, record.TransferName, record.Message, record.Files, record.TotalBytes); err != nil {
@@ -150,7 +154,11 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 
 	for _, recipient := range emails {
 		if s.smtpConfig.Host == "" {
-			log.Printf("[DEV] Email to %s: Transfer '%s' message: %q code: %s", recipient, record.TransferName, record.Message, body.Code)
+			if logSecrets {
+				log.Printf("[DEV] Email to %s: Transfer '%s' message: %q code: %s", recipient, record.TransferName, record.Message, body.Code)
+			} else {
+				log.Printf("SMTP not configured: transfer code for %s not emailed (set WEB_DEV_LOG_SECRETS=1 to log it for local testing)", recipient)
+			}
 			sent++
 			continue
 		}
@@ -337,4 +345,3 @@ func formatBytes(b int64) string {
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
-

@@ -159,6 +159,13 @@ func (s *limiterStore) Run() {
 // otherwise clients can spoof their address to dodge rate limits.
 var trustProxy bool
 
+// logSecrets makes a server without SMTP write the login links, transfer
+// codes and messages it would have emailed to its log, so local testing can
+// log in and see what was sent. Off by default: `docker compose up` without
+// SMTP is the quickest way to run the site, and container logs are kept,
+// shipped and shared.
+var logSecrets bool
+
 // clientIP identifies the caller for rate limiting.
 func clientIP(req *http.Request) string {
 	if trustProxy {

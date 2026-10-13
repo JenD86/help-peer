@@ -106,6 +106,10 @@ func main() {
 	}
 
 	trustProxy = os.Getenv("WEB_TRUST_PROXY") == "1"
+	logSecrets = os.Getenv("WEB_DEV_LOG_SECRETS") == "1"
+	if logSecrets && smtpConfig.Host == "" {
+		log.Printf("WARNING: WEB_DEV_LOG_SECRETS=1: login links and transfer codes will be written to this log. Use only for local testing.")
+	}
 
 	dataDir := os.Getenv("WEB_DATA_DIR")
 	if dataDir == "" {

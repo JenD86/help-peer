@@ -70,8 +70,10 @@ func (a *Auth) authRequestHandler(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to send email")
 			return
 		}
+	} else if logSecrets {
+		log.Printf("[DEV] Magic link for %s: %s", body.Email, magicURL)
 	} else {
-		log.Printf("Magic link for %s: %s", body.Email, magicURL)
+		log.Printf("SMTP not configured: login link for %s not sent (set WEB_DEV_LOG_SECRETS=1 to log it for local testing)", body.Email)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{

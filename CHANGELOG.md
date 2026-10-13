@@ -4,6 +4,10 @@ Notable changes to Help Peer. Entries marked **Action required** need storage no
 
 ## Unreleased
 
+### Web backend: dev mode no longer logs login links and transfer codes
+
+Without SMTP configured, the web backend used to write login links, and the transfer codes and messages it would have emailed, to its log, where anyone with access to `docker logs` could use them. It now logs only that an email wasn't sent. For local testing, set `WEB_DEV_LOG_SECRETS=1` to get the old behaviour.
+
 ### Web app: security headers
 
 The web app now sends a strict Content-Security-Policy (scripts, styles and requests only to the site itself; WebAssembly allowed for Argon2id key derivation, but no `eval` or inline scripts), plus `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Cross-Origin-Opener-Policy` and `Permissions-Policy`. If you self-host behind a reverse proxy, enable HSTS there.
