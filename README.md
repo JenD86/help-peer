@@ -457,7 +457,7 @@ The Python CLI takes the same `--relay`, `--nodes` and `--json` flags as the Rus
 
 ```
 help-peer/
-├── architecture_guide_ai_model_adaptation.md  # Full architecture document
+├── architecture_guide_ai_model_adaptation.md  # Original design notes (not a spec; see protocol/SPEC.md)
 ├── protocol/
 │   ├── SPEC.md                                # Wire protocol specification
 │   ├── test-vectors.json                      # Cross-implementation test vectors

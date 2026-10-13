@@ -1,5 +1,17 @@
 # Architecture Guide: Asynchronous Ephemeral "Wormhole" for AI Models
 
+> **Status: design direction, not a specification.** This is the original design document. Parts of it describe plans that aren't implemented, and it should not be used to build a compatible client or to judge what the system does today. The protocol as implemented is specified in [`protocol/SPEC.md`](protocol/SPEC.md) (checked by the shared test vectors in `protocol/test-vectors.json`), and the [README](README.md) describes the current behaviour and trust model.
+>
+> Where this guide differs from the code:
+>
+> | Section | This guide describes | What the code does |
+> | --- | --- | --- |
+> | 5.1, 8.1 | Kademlia DHT for node discovery, node reputation | No DHT. Nodes are a configured list, or register with a web backend that checks and audits them ([SPEC §2.5](protocol/SPEC.md)) |
+> | 5.3, 5.4 | UDP hole-punching, QUIC | Plain HTTP(S); nodes need a public address |
+> | 3 (Phase 4), 4, 10 | SQLite resume state, `spake2` and `rusqlite` dependencies | Resume state is a JSON-lines file ([SPEC §8](protocol/SPEC.md)); no PAKE, as Phase 1 explains; no SQLite |
+> | 7 | Relay backed by SQLite | Relay stores manifests as files in `RELAY_DIR` |
+> | 8.3 | With too few nodes, the transfer pauses and waits | `receive` stops with an error; running it again with the same code resumes |
+
 ## 1. System Overview
 
 This system is explicitly designed for the secure, decentralized, and asynchronous transfer of massive AI model weight directories (often $50\text{ GB} - 150\text{ GB}+$). It combines a human-readable transfer code (stretched with Argon2id into encryption keys) with an encrypted, sharded ephemeral storage layer, optimized for the unique constraints of handling large machine learning assets.
