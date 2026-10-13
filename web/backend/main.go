@@ -257,7 +257,40 @@ func (s *Server) routes() http.Handler {
 
 	// Serve the frontend
 	mux.Handle("/", spaHandler(s.static, s.baseURL))
-	return mux
+	return securityHeaders(mux)
+}
+
+// contentSecurityPolicy limits the page to this site's own scripts, styles
+// and API. 'wasm-unsafe-eval' lets it compile WebAssembly (Argon2id, via
+// hash-wasm) without allowing JavaScript eval. It stops injected or
+// third-party scripts; it can't protect users from the operator, who serves
+// the page itself (see README, "Web trust model").
+const contentSecurityPolicy = "default-src 'none'; " +
+	"script-src 'self' 'wasm-unsafe-eval'; " +
+	"style-src 'self'; " +
+	"img-src 'self'; " +
+	"font-src 'self'; " +
+	"connect-src 'self'; " +
+	"manifest-src 'self'; " +
+	"base-uri 'none'; " +
+	"form-action 'self'; " +
+	"frame-ancestors 'none'; " +
+	"object-src 'none'"
+
+// securityHeaders adds browser security headers to every response. HSTS is
+// left to the TLS-terminating proxy, which knows whether HTTPS is in use.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", contentSecurityPolicy)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		// Matches the page's <meta name="referrer">: other sites get only the origin.
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+		next.ServeHTTP(w, req)
+	})
 }
 
 // spaHandler serves static files, falling back to index.html for client-side

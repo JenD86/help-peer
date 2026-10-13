@@ -551,6 +551,33 @@ func TestSPAFallback(t *testing.T) {
 	}
 }
 
+func TestSecurityHeaders(t *testing.T) {
+	e := newTestEnv(t)
+	// The page, its assets, API responses and 404s all get the headers.
+	for _, path := range []string{"/", "/download", "/assets/app.js", "/api/config", "/api/nope", "/favicon.ico"} {
+		resp, err := http.Get(e.srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		csp := resp.Header.Get("Content-Security-Policy")
+		for _, want := range []string{"default-src 'none'", "script-src 'self' 'wasm-unsafe-eval'", "frame-ancestors 'none'"} {
+			if !strings.Contains(csp, want) {
+				t.Errorf("%s: CSP %q lacks %q", path, csp, want)
+			}
+		}
+		if strings.Contains(csp, "unsafe-inline") || strings.Contains(csp, "'unsafe-eval'") {
+			t.Errorf("%s: CSP allows inline code or eval: %q", path, csp)
+		}
+		if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options %q", path, got)
+		}
+		if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("%s: X-Frame-Options %q", path, got)
+		}
+	}
+}
+
 func TestRobotsAndSitemapNameTheSite(t *testing.T) {
 	e := newTestEnv(t)
 	for path, want := range map[string]string{

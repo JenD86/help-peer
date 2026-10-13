@@ -5,3 +5,11 @@
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
+
+/* The no-JavaScript fallback in index.html (inline styles would break the CSP). */
+.prerender {
+  max-width: 42rem;
+  margin: 4rem auto;
+  padding: 0 1.5rem;
+  font-family: system-ui, sans-serif;
+}

@@ -2,6 +2,12 @@
 
 Notable changes to Help Peer. Entries marked **Action required** need storage node operators or users to update.
 
+## Unreleased
+
+### Web app: security headers
+
+The web app now sends a strict Content-Security-Policy (scripts, styles and requests only to the site itself; WebAssembly allowed for Argon2id key derivation, but no `eval` or inline scripts), plus `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Cross-Origin-Opener-Policy` and `Permissions-Policy`. If you self-host behind a reverse proxy, enable HSTS there.
+
 ## 2026-10-13 — Python SDK 0.2.1 and CLI
 
 ### CLI and Python SDK: receivers could be made to request internal addresses — **Action required: update the CLI and SDK**
