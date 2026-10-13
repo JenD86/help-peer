@@ -40,7 +40,7 @@ jobs:
           set -euo pipefail
           cd "$APP_DIR"
           git pull --ff-only origin main
-          docker compose up -d --build --remove-orphans
+          GIT_COMMIT=$(git rev-parse HEAD) docker compose up -d --build --remove-orphans
           docker image prune -f
 
           for i in $(seq 1 30); do

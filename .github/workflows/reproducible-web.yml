@@ -1,0 +1,52 @@
+name: Reproducible web build
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - ".github/workflows/reproducible-web.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the frontend
+        run: docker build --target frontend-builder -t web-frontend web
+
+      - name: Hash the built files
+        run: |
+          container=$(docker create web-frontend)
+          docker cp "$container:/app/backend/static" static
+          (cd static && find . -type f | sort | xargs sha256sum) | tee sums.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sums-${{ matrix.arch }}
+          path: sums.txt
+
+  compare:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Compare the two builds
+        run: |
+          if diff -u sums-amd64/sums.txt sums-arm64/sums.txt; then
+            echo "The amd64 and arm64 builds produced identical files."
+          else
+            echo "The amd64 and arm64 builds differ, so the web build is not reproducible."
+            exit 1
+          fi

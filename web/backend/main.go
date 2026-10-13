@@ -248,6 +248,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/notify", s.notifyHandler)
 	mux.HandleFunc("/api/history", s.historyHandler)
 	mux.HandleFunc("/api/health", s.healthHandler)
+	mux.HandleFunc("/api/version", s.versionHandler)
 	mux.HandleFunc("/api/node/register", s.nodeRegisterHandler)
 	mux.HandleFunc("/api/node/deregister", s.nodeDeregisterHandler)
 	mux.HandleFunc("/api/admin/nodes", s.adminNodesHandler)
