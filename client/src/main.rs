@@ -191,6 +191,15 @@ async fn main() {
                 let Some(api) = &api else {
                     out.fail("Send", "sending to recipients needs a login: run `helppeer login` first".into())
                 };
+                // Recipients see the sender's username, so the site requires one.
+                match api.whoami().await {
+                    Ok((_, username)) if username.is_empty() => out.fail(
+                        "Send",
+                        "choose a username on the website's Account page before sending to recipients".into(),
+                    ),
+                    Ok(_) => {}
+                    Err(e) => out.fail("Send", e),
+                }
                 for r in recipients.iter().filter(|r| !account::is_email(r)) {
                     match api.username_exists(r).await {
                         Ok(true) => {}
@@ -391,7 +400,7 @@ async fn main() {
                         .as_str()
                         .filter(|s| !s.is_empty())
                         .map(|u| format!("@{}", u))
-                        .unwrap_or_else(|| item["sender_email"].as_str().unwrap_or("?").to_string());
+                        .unwrap_or_else(|| "unknown sender".to_string());
                     println!(
                         "{} — from {} ({} file(s), {} bytes, expires {})",
                         manifest::printable(item["transfer_name"].as_str().unwrap_or("untitled")),

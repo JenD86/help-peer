@@ -66,6 +66,9 @@ def send(
     if recipients:
         if api is None:
             raise RuntimeError("sending to recipients needs a login: call helppeer.login() first")
+        # Recipients see the sender's username, so the site requires one.
+        if not api.whoami()["username"]:
+            raise RuntimeError("choose a username on the website's Account page before sending to recipients")
         unknown = [r for r in recipients if not is_email(r) and not api.username_exists(r)]
         if unknown:
             raise ValueError(f"unknown username(s): {', '.join(unknown)}")

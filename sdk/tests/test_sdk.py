@@ -515,3 +515,16 @@ class TestMessage:
 
     def test_printable_strips_escape_sequences(self):
         assert manifest.printable("hi\x1b[2Jthere\nline 2\ttab\x07") == "hi[2Jthere\nline 2\ttab"
+
+
+class TestSendToRecipients:
+    def test_requires_username_before_uploading(self, tmp_path, monkeypatch):
+        class Api:
+            def whoami(self):
+                return {"email": "a@example.com", "username": ""}
+
+        monkeypatch.setattr(client, "current_api", lambda: Api())
+        monkeypatch.setattr(client, "resolve_servers", lambda: pytest.fail("uploaded before checking"))
+        (tmp_path / "f.bin").write_bytes(b"x")
+        with pytest.raises(RuntimeError, match="username"):
+            client.send(str(tmp_path / "f.bin"), to=["bob"])

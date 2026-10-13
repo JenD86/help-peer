@@ -20,7 +20,7 @@ import (
 type InboxItem struct {
 	ID             string    `json:"id"`
 	RecipientEmail string    `json:"recipient_email"`
-	SenderEmail    string    `json:"sender_email"`
+	SenderEmail    string    `json:"sender_email,omitempty"` // stored, never sent to the recipient
 	SenderUsername string    `json:"sender_username,omitempty"`
 	TransferName   string    `json:"transfer_name"`
 	Message        string    `json:"message,omitempty"`
@@ -342,6 +342,8 @@ func (s *Server) inboxHandler(w http.ResponseWriter, req *http.Request) {
 				s.db.DeleteInboxItems(func(i *InboxItem) bool { return i.ID == id })
 				continue
 			}
+			// Recipients see the sender's username, never their email.
+			item.SenderEmail = ""
 			live = append(live, item)
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"items": live})
@@ -459,7 +461,7 @@ func (s *Server) registerTransferHandler(w http.ResponseWriter, req *http.Reques
 	record := &TransferRecord{
 		ID:           generateToken(16),
 		SenderEmail:  email,
-		TransferName: truncate(body.TransferName, maxNameLength),
+		TransferName: transferLabel(body.TransferName, body.Files, body.TotalBytes),
 		Message:      message,
 		Files:        body.Files,
 		TotalBytes:   body.TotalBytes,

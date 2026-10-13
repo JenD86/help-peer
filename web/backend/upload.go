@@ -237,7 +237,7 @@ func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request)
 		record := &TransferRecord{
 			ID:           generateToken(16),
 			SenderEmail:  email,
-			TransferName: truncate(body.TransferName, maxNameLength),
+			TransferName: transferLabel(body.TransferName, body.Files, body.TotalBytes),
 			Message:      message,
 			Files:        body.Files,
 			TotalBytes:   body.TotalBytes,
@@ -247,6 +247,20 @@ func (s *Server) manifestUploadHandler(w http.ResponseWriter, req *http.Request)
 		resp["transfer_id"] = record.ID
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// transferLabel is the name the server keeps and shows for a transfer: the
+// name the sender typed, or else a neutral description. Clients don't send
+// file names unless typed as the name; the real name travels in the
+// encrypted manifest.
+func transferLabel(name string, files int, totalBytes int64) string {
+	if name = strings.TrimSpace(name); name != "" {
+		return truncate(name, maxNameLength)
+	}
+	if files == 1 {
+		return "1 file, " + formatBytes(totalBytes)
+	}
+	return fmt.Sprintf("%d files, %s", files, formatBytes(totalBytes))
 }
 
 const maxMessageChars = 2000

@@ -443,6 +443,8 @@ func TestManifestUploadHistoryAndNotify(t *testing.T) {
 
 	alice := e.s.db.CreateSession("alice@example.com")
 	bob := e.s.db.CreateSession("bob@example.com")
+	e.s.db.SetProfile("alice@example.com", "alice", false)
+	e.s.db.SetProfile("bob@example.com", "bob", false)
 	hash := strings.Repeat("12", 32)
 
 	var up map[string]string
@@ -505,8 +507,9 @@ func TestLegacyTransfersAreRekeyed(t *testing.T) {
 	if strings.Contains(string(data), "orbit-velvet-zoom") {
 		t.Fatalf("legacy code still on disk: %s", data)
 	}
-	if got := db.GetTransfersByEmail("a@example.com"); len(got) != 1 {
-		t.Fatalf("legacy record lost: %v", got)
+	// Legacy records have no creation time, so they're past the history TTL.
+	if got := db.GetTransfersByEmail("a@example.com"); len(got) != 0 {
+		t.Fatalf("legacy record kept: %v", got)
 	}
 	if _, ok := db.GetSession("tok"); ok {
 		t.Fatal("legacy session without expiry accepted")
@@ -934,6 +937,7 @@ func TestInboxDropsGoneTransfers(t *testing.T) {
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
 	alice := e.s.db.CreateSession("alice@example.com")
+	e.s.db.SetProfile("alice@example.com", "alice", false)
 	bob := e.s.db.CreateSession("bob@example.com")
 	e.s.db.SetProfile("bob@example.com", "bob", false)
 
@@ -976,6 +980,7 @@ func TestAPITokens(t *testing.T) {
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
 	alice := e.s.db.CreateSession("alice@example.com")
+	e.s.db.SetProfile("alice@example.com", "alice", false)
 
 	code, out := e.do(t, "POST", "/api/tokens", map[string]string{"name": "laptop"}, alice, "")
 	token, _ := out["token"].(string)
@@ -1059,6 +1064,7 @@ func TestMessageReachesInboxAndEmails(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 
 	alice := e.s.db.CreateSession("alice@example.com")
+	e.s.db.SetProfile("alice@example.com", "alice", false)
 	bob := e.s.db.CreateSession("bob@example.com")
 	e.s.db.SetProfile("bob@example.com", "bob", false)
 	hash := strings.Repeat("ab", 32)
@@ -1137,6 +1143,77 @@ func TestDevLogsWithholdSecretsByDefault(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "WEB_DEV_LOG_SECRETS=1") {
 		t.Errorf("log doesn't say how to see login links: %s", logs.String())
+	}
+}
+
+func TestNotifyRequiresUsername(t *testing.T) {
+	e := newTestEnv(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	alice := e.s.db.CreateSession("alice@example.com")
+	e.s.db.SetProfile("bob@example.com", "bob", false)
+	code, out := sendToUsers(t, e, alice, strings.Repeat("ab", 32), []string{"bob", "carol@example.com"})
+	if code != 400 || !strings.Contains(fmt.Sprint(out["error"]), "username") {
+		t.Fatalf("notify without a username: %d %v", code, out)
+	}
+	if len(e.s.db.InboxFor("bob@example.com")) != 0 {
+		t.Fatal("inbox item created for a sender without a username")
+	}
+}
+
+func TestInboxHidesSenderEmail(t *testing.T) {
+	e := newTestEnv(t)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	alice := e.s.db.CreateSession("alice@example.com")
+	bob := e.s.db.CreateSession("bob@example.com")
+	e.s.db.SetProfile("alice@example.com", "alice", false)
+	e.s.db.SetProfile("bob@example.com", "bob", false)
+	if code, out := sendToUsers(t, e, alice, strings.Repeat("ab", 32), []string{"bob"}); code != 200 {
+		t.Fatalf("notify: %d %v", code, out)
+	}
+	req, _ := http.NewRequest(http.MethodGet, e.srv.URL+"/api/inbox", nil)
+	req.AddCookie(&http.Cookie{Name: "helppeer_session", Value: bob})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(raw), "alice@example.com") || !strings.Contains(string(raw), `"sender_username":"alice"`) {
+		t.Fatalf("inbox response: %s", raw)
+	}
+}
+
+func TestTransferHistoryExpires(t *testing.T) {
+	e := newTestEnv(t)
+	e.s.db.SaveTransfer(&TransferRecord{ID: "old", SenderEmail: "a@example.com", CreatedAt: time.Now().Add(-25 * time.Hour)})
+	e.s.db.SaveTransfer(&TransferRecord{ID: "new", SenderEmail: "a@example.com", CreatedAt: time.Now()})
+	if got := e.s.db.GetTransfersByEmail("a@example.com"); len(got) != 1 || got[0].ID != "new" {
+		t.Fatalf("history: %v", got)
+	}
+	if _, ok := e.s.db.GetTransfer("old"); ok {
+		t.Fatal("expired record still usable")
+	}
+	if _, ok := e.s.db.transfers["old"]; ok {
+		t.Fatal("expired record kept on disk")
+	}
+}
+
+func TestTransferLabel(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		files int
+		bytes int64
+		want  string
+	}{
+		{"  Llama fine-tune  ", 3, 100, "Llama fine-tune"},
+		{"", 1, 2048, "1 file, 2.0 KB"},
+		{" ", 3, 1536, "3 files, 1.5 KB"},
+	} {
+		if got := transferLabel(c.name, c.files, c.bytes); got != c.want {
+			t.Errorf("transferLabel(%q, %d, %d) = %q, want %q", c.name, c.files, c.bytes, got, c.want)
+		}
 	}
 }
 

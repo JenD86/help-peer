@@ -4,6 +4,12 @@ Notable changes to Help Peer. Entries marked **Action required** need storage no
 
 ## Unreleased
 
+### Web: less metadata kept and shown
+
+- **Sending to recipients now needs a username.** Recipients see `@username`; a sender's email address is no longer shown to them, and the inbox API no longer includes it (it previously did even for senders with a username). The web app, CLI and SDK check for a username before uploading.
+- **File names no longer reach the server by default.** The web app used the first file's name as the transfer name and sent it to the server. Now the server only stores a name you type; otherwise it shows the number of files and total size. The real name stays in the encrypted manifest.
+- **Transfer history is kept for 24 hours**, like the transfers themselves, instead of indefinitely. Older records, including those from before this change, are deleted.
+
 ### Web backend: dev mode no longer logs login links and transfer codes
 
 Without SMTP configured, the web backend used to write login links, and the transfer codes and messages it would have emailed, to its log, where anyone with access to `docker logs` could use them. It now logs only that an email wasn't sent. For local testing, set `WEB_DEV_LOG_SECRETS=1` to get the old behaviour.

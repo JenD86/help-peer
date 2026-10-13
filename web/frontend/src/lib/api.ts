@@ -198,7 +198,6 @@ export async function lookupUser(username: string): Promise<boolean> {
 export interface InboxItem {
   id: string
   sender_username?: string
-  sender_email: string
   transfer_name: string
   message?: string
   files: number

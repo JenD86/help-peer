@@ -100,10 +100,7 @@ export default function Upload() {
       setMediaWarning('')
     }
     setFiles(prev => [...prev, ...allowed])
-    if (!transferName && allowed.length > 0) {
-      setTransferName(allowed[0].name)
-    }
-  }, [transferName])
+  }, [])
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(e.target.files || [])
@@ -115,9 +112,6 @@ export default function Upload() {
       setMediaWarning('')
     }
     setFiles(prev => [...prev, ...allowed])
-    if (!transferName && allowed.length > 0) {
-      setTransferName(allowed[0].name)
-    }
   }
 
   const removeFile = (idx: number) => {
@@ -150,8 +144,12 @@ export default function Upload() {
         .map(r => r.trim())
         .filter(r => r.length > 0)
       if (recipientList.length > 0) {
-        if (!(await checkAuth()).authenticated) {
+        const me = await checkAuth()
+        if (!me.authenticated) {
           throw new Error('Log in to send to recipients, or leave the recipients field empty.')
+        }
+        if (!me.username) {
+          throw new Error('Choose a username on your Account page before sending to recipients. Recipients see it instead of your email.')
         }
         // Catch unknown usernames before uploading anything.
         const usernames = recipientList.filter(r => !isEmail(r))
@@ -162,7 +160,10 @@ export default function Upload() {
         }
       }
 
-      const name = transferName || files[0].name
+      // The site only gets a name you typed; otherwise it shows "N files, size".
+      // The manifest (encrypted) falls back to the first file's name.
+      const typedName = transferName.trim()
+      const name = typedName || files[0].name
       const code = generateCode()
       const { kData, kIndex } = await deriveKeys(code)
       const rHash = relayHash(kIndex)
@@ -238,7 +239,7 @@ export default function Upload() {
         ackHash: secretHash(ackSecret),
         message: note,
         maxRetrievals: Math.min(Math.max(recipientList.length, 1), MAX_RETRIEVALS),
-        transferName: name,
+        transferName: typedName,
         files: files.length,
         totalBytes,
       })
@@ -384,8 +385,12 @@ export default function Upload() {
         placeholder="Transfer name (optional)"
         value={transferName}
         onChange={(e) => setTransferName(e.target.value)}
-        className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-4 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+        className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-1 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
       />
+      <p className="text-xs text-gray-500 mb-4">
+        Visible to this site, in your history and recipients' inboxes and emails. Left blank, they see the number of files
+        and total size until they open the transfer.
+      </p>
 
       {/* Message */}
       <textarea

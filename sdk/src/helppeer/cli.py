@@ -183,7 +183,7 @@ def _inbox(args):
     if not items:
         print("Nothing waiting for you.")
     for item in items:
-        sender = f"@{item['sender_username']}" if item.get("sender_username") else item.get("sender_email", "?")
+        sender = f"@{item['sender_username']}" if item.get("sender_username") else "unknown sender"
         print(f"{printable(item.get('transfer_name') or 'untitled')} — from {printable(sender)} "
               f"({item['files']} file(s), {item['total_bytes']} bytes, expires {item['expires_at']})")
         for line in printable(item.get("message") or "").splitlines():

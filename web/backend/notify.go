@@ -41,6 +41,13 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	// Recipients are told who sent a transfer by username, so a sender's
+	// email address is never shown to them.
+	sender, _ := s.db.GetUser(senderEmail)
+	if sender.Username == "" {
+		writeError(w, http.StatusBadRequest, "choose a username on your Account page before sending to recipients")
+		return
+	}
 
 	var body NotifyRequest
 	req.Body = http.MaxBytesReader(w, req.Body, 64*1024)
@@ -112,12 +119,7 @@ func (s *Server) notifyHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	s.db.SetRecipients(record.ID, senderEmail, body.Recipients)
-
-	sender, _ := s.db.GetUser(senderEmail)
-	senderName := senderEmail
-	if sender.Username != "" {
-		senderName = sender.Username
-	}
+	senderName := sender.Username
 
 	sent, inboxed := 0, 0
 	errors := []string{}

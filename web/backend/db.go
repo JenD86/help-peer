@@ -53,6 +53,11 @@ type MagicLink struct {
 	Expires time.Time `json:"expires"`
 }
 
+// transferHistoryTTL is how long a sender's history entry is kept: as long
+// as the transfer itself can be received, so the server doesn't build up a
+// record of who sent what to whom.
+const transferHistoryTTL = 24 * time.Hour
+
 // TransferRecord is a sender's history entry. It deliberately has no code:
 // whoever holds the code can decrypt the transfer, so the server must not
 // keep it.
@@ -184,6 +189,15 @@ func (d *DB) removeExpiredLocked() {
 			delete(d.inbox, id)
 		}
 	}
+	for id, t := range d.transfers {
+		if t == nil || t.expired(now) {
+			delete(d.transfers, id)
+		}
+	}
+}
+
+func (t *TransferRecord) expired(now time.Time) bool {
+	return now.Sub(t.CreatedAt) > transferHistoryTTL
 }
 
 func (d *DB) GetOrCreateUser(email string) *User {
@@ -272,6 +286,7 @@ func (d *DB) DeleteSession(token string) {
 func (d *DB) SaveTransfer(record *TransferRecord) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.removeExpiredLocked()
 	d.transfers[record.ID] = record
 	d.save()
 }
@@ -294,7 +309,7 @@ func (d *DB) GetTransfer(id string) (TransferRecord, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	t, ok := d.transfers[id]
-	if !ok {
+	if !ok || t.expired(time.Now()) {
 		return TransferRecord{}, false
 	}
 	return *t, true
@@ -306,8 +321,9 @@ func (d *DB) GetTransfersByEmail(email string) []*TransferRecord {
 	defer d.mu.Unlock()
 
 	var result []*TransferRecord
+	now := time.Now()
 	for _, t := range d.transfers {
-		if t.SenderEmail == email {
+		if t.SenderEmail == email && !t.expired(now) {
 			copied := *t
 			result = append(result, &copied)
 		}
