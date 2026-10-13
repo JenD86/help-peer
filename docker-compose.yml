@@ -5,6 +5,10 @@ services:
       dockerfile: Dockerfile
     ports:
       - "127.0.0.1:7000:7000"
+    networks:
+      default:
+      proxy:
+        aliases: [help-peer-relay]
     environment:
       - RELAY_PORT=7000
       - RELAY_DIR=/data
@@ -20,6 +24,10 @@ services:
       dockerfile: Dockerfile
     ports:
       - "127.0.0.1:7001:7001"
+    networks:
+      default:
+      proxy:
+        aliases: [help-peer-node]
     environment:
       - STORAGE_PORT=7001
       - STORAGE_DIR=/data
@@ -35,6 +43,10 @@ services:
       dockerfile: Dockerfile
     ports:
       - "127.0.0.1:8080:8080"
+    networks:
+      default:
+      proxy:
+        aliases: [help-peer-web]
     environment:
       - WEB_PORT=8080
       - RELAY_URL=http://relay:7000
@@ -73,6 +85,10 @@ services:
   #     - S3_ACCESS_KEY=minioadmin
   #     - S3_SECRET_KEY=minioadmin
   #     - S3_PREFIX=shards
+
+networks:
+  proxy:
+    name: proxy
 
 # volumes:
 #   relay-data:
