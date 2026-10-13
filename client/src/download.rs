@@ -7,6 +7,7 @@ use crate::crypto;
 use crate::erasure;
 use crate::http;
 use crate::manifest::{self, Manifest, ManifestSegment};
+use crate::nodes::NodeClients;
 use crate::resume::ResumeLog;
 use crate::validator::ValidatorRegistry;
 
@@ -40,7 +41,7 @@ pub async fn open_transfer(client: &Client, code: &str, relay_url: &str) -> Resu
     let relay_hash = crypto::relay_hash(&k_index);
 
     let manifest_url = format!("{}/manifest/{}", relay_url, relay_hash);
-    let encrypted_manifest = http::get(client, &manifest_url, "manifest download")
+    let encrypted_manifest = http::get(client, &manifest_url, "manifest download", manifest::MAX_MANIFEST_BYTES)
         .await?
         .ok_or("transfer not found: the code is wrong, it expired, or it was already received")?;
 
@@ -50,13 +51,16 @@ pub async fn open_transfer(client: &Client, code: &str, relay_url: &str) -> Resu
     Ok(OpenedTransfer { manifest, manifest_json, manifest_url, relay_hash, k_data })
 }
 
-/// Download and reconstruct a transfer using a code.
+/// Download and reconstruct a transfer using a code. `configured_nodes` are
+/// the receiver's own storage nodes; see [`NodeClients`].
 pub async fn download_transfer(
     code: &str,
     output_dir: &Path,
     relay_url: &str,
+    configured_nodes: &[String],
 ) -> Result<DownloadResult, String> {
     let client = http::client()?;
+    let node_clients = NodeClients::new(configured_nodes)?;
 
     // The manifest stays on the relay until we confirm success below, so a
     // failed download can be retried.
@@ -102,7 +106,7 @@ pub async fn download_transfer(
             }
 
             // Download shards for this segment
-            let shard_data = download_shards_for_segment(&client, segment).await?;
+            let shard_data = download_shards_for_segment(&node_clients, segment).await?;
 
             // Reconstruct the encrypted segment
             let encrypted = erasure::decode_segment(shard_data, segment.encrypted_size)?;
@@ -169,20 +173,28 @@ pub async fn download_transfer(
 /// the manifest hash (corrupt or malicious node) is discarded, and fetching
 /// stops as soon as DATA_SHARDS good shards have arrived.
 async fn download_shards_for_segment(
-    client: &Client,
+    node_clients: &NodeClients,
     segment: &ManifestSegment,
 ) -> Result<Vec<Option<Vec<u8>>>, String> {
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; crypto::TOTAL_SHARDS];
     let mut tasks = JoinSet::new();
+    let shard_size = (segment.encrypted_size + crypto::DATA_SHARDS - 1) / crypto::DATA_SHARDS;
+    let mut refused = None;
 
     for shard in &segment.shards {
-        let client = client.clone();
-        let url = format!("{}/shard/{}", shard.node, shard.hash);
+        let client = match node_clients.for_node(&shard.node) {
+            Ok(c) => c.clone(),
+            Err(e) => {
+                refused = Some(e);
+                continue;
+            }
+        };
+        let url = format!("{}/shard/{}", shard.node.trim_end_matches('/'), shard.hash);
         let hash = shard.hash.clone();
         let index = shard.index as usize;
 
         tasks.spawn(async move {
-            match http::get(&client, &url, "shard download").await {
+            match http::get(&client, &url, "shard download", shard_size).await {
                 Ok(Some(data)) if crypto::content_hash(&data) == hash => Some((index, data)),
                 _ => None,
             }
@@ -202,10 +214,11 @@ async fn download_shards_for_segment(
 
     if have < crypto::DATA_SHARDS {
         return Err(format!(
-            "segment {}: only {} of {} needed shards are available",
+            "segment {}: only {} of {} needed shards are available{}",
             segment.id,
             have,
-            crypto::DATA_SHARDS
+            crypto::DATA_SHARDS,
+            refused.map(|e| format!(" ({})", e)).unwrap_or_default()
         ));
     }
     Ok(shards)

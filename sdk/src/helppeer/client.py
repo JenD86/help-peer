@@ -8,7 +8,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import blake3
 import requests
@@ -19,9 +19,10 @@ from .account import current_api, is_email
 from .config import get_config, resolve_servers
 from . import crypto
 from . import erasure
+from .nodes import NodeSessions, NoRetryOnPrivateAddress, PublicOnlyAdapter
 from .manifest import (
     Manifest, ManifestSegment, ManifestShard,
-    MAX_MESSAGE_CHARS, build_manifest, read_file_segment, safe_output_path,
+    MAX_MANIFEST_BYTES, MAX_MESSAGE_CHARS, build_manifest, read_file_segment, safe_output_path,
 )
 from .resume import ResumeLog
 from .validator import ValidatorRegistry
@@ -170,11 +171,12 @@ def receive(
         ({path: blake3}), file_list ([{path, size, blake3}]), acknowledged
         and resumed_segments.
     """
-    relay_url, _ = resolve_servers()
+    relay_url, nodes = resolve_servers()
     k_data, k_index = crypto.derive_keys(code)
     r_hash = crypto.relay_hash(k_index)
 
-    with _session() as session:
+    with _session() as session, _public_session() as public:
+        node_sessions = NodeSessions(nodes, session, public)
         # Download encrypted manifest from relay. It stays there until we
         # confirm success below, so a failed download can be retried.
         encrypted_manifest = _download_manifest(session, relay_url, r_hash)
@@ -222,7 +224,7 @@ def receive(
                             continue
 
                     shard_data = _download_shards(
-                        session, pool, segment,
+                        node_sessions, pool, segment,
                         manifest.erasure_data_shards, manifest.erasure_parity_shards,
                     )
                     encrypted = erasure.decode_segment(
@@ -313,12 +315,13 @@ def cancel(code: str) -> Dict[str, Any]:
     Returns:
         Dict with transfer_name, shards_deleted, shards_already_gone, shards_failed.
     """
-    relay_url, _ = resolve_servers()
+    relay_url, nodes = resolve_servers()
     k_data, k_index = crypto.derive_keys(code)
     r_hash = crypto.relay_hash(k_index)
     manifest_url = f"{relay_url}/manifest/{r_hash}"
 
-    with _session() as session:
+    with _session() as session, _public_session() as public:
+        node_sessions = NodeSessions(nodes, session, public)
         encrypted_manifest = _download_manifest(session, relay_url, r_hash)
         manifest = Manifest.from_json(crypto.decrypt_segment(k_data, encrypted_manifest))
         manifest.validate()
@@ -331,12 +334,12 @@ def cancel(code: str) -> Dict[str, Any]:
 
         def delete_shard(shard: ManifestShard) -> str:
             try:
-                r = session.delete(
-                    f"{shard.node}/shard/{shard.hash}",
-                    headers={"X-Delete-Token": manifest.delete_token}, timeout=TIMEOUT,
+                r = node_sessions.for_node(shard.node).delete(
+                    _shard_url(shard), headers={"X-Delete-Token": manifest.delete_token},
+                    timeout=TIMEOUT, allow_redirects=False,
                 )
-            except requests.RequestException:
-                return "failed"
+            except (requests.RequestException, ValueError):
+                return "failed"  # unreachable, or a node we may not contact
             return {204: "deleted", 404: "already_gone"}.get(r.status_code, "failed")
 
         shards = [sh for f in manifest.files for seg in f.segments for sh in seg.shards]
@@ -351,11 +354,11 @@ def cancel(code: str) -> Dict[str, Any]:
     }
 
 
-def _session() -> requests.Session:
+def _session(adapter_cls=HTTPAdapter, retry_cls=Retry) -> requests.Session:
     """A pooled session that retries transient failures (connection errors,
     5xx, 429) with backoff."""
     session = requests.Session()
-    retry = Retry(
+    retry = retry_cls(
         total=3,
         backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
@@ -365,10 +368,40 @@ def _session() -> requests.Session:
         allowed_methods=frozenset({"GET", "PUT"}),
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=32)
+    adapter = adapter_cls(max_retries=retry, pool_maxsize=32)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+
+def _public_session() -> requests.Session:
+    """A session for storage nodes the receiver didn't configure: it only
+    connects to public addresses (see nodes.py), and ignores proxy settings,
+    since a proxy would make the connection itself, skipping that check."""
+    session = _session(PublicOnlyAdapter, NoRetryOnPrivateAddress)
+    session.trust_env = False
+    return session
+
+
+def _shard_url(shard: ManifestShard) -> str:
+    return f"{shard.node.rstrip('/')}/shard/{shard.hash}"
+
+
+def _get_limited(session: requests.Session, url: str, max_bytes: int) -> Tuple[int, Optional[bytes]]:
+    """GET url without following redirects. Returns (status, body), where body
+    is None unless the status is 200. A body over max_bytes raises ValueError,
+    so a server can't exhaust our memory."""
+    with session.get(url, timeout=TIMEOUT, stream=True, allow_redirects=False) as resp:
+        if resp.status_code != 200:
+            return resp.status_code, None
+        if int(resp.headers.get("Content-Length") or 0) > max_bytes:
+            raise ValueError(f"response from {url} is larger than {max_bytes} bytes")
+        body = bytearray()
+        for chunk in resp.iter_content(1 << 16):
+            body += chunk
+            if len(body) > max_bytes:
+                raise ValueError(f"response from {url} is larger than {max_bytes} bytes")
+        return 200, bytes(body)
 
 
 def _warn_if_too_few_nodes(nodes: int, total_shards: int, parity_shards: int) -> None:
@@ -448,18 +481,18 @@ def _acknowledge(session: requests.Session, relay_url: str, r_hash: str, ack_sec
 
 def _download_manifest(session: requests.Session, relay_url: str, r_hash: str) -> bytes:
     """Download encrypted manifest from relay (one-time retrieval)."""
-    resp = session.get(f"{relay_url}/manifest/{r_hash}", timeout=TIMEOUT)
-    if resp.status_code == 404:
+    status, body = _get_limited(session, f"{relay_url}/manifest/{r_hash}", MAX_MANIFEST_BYTES)
+    if status == 404:
         raise RuntimeError(
             "transfer not found: the code is wrong, it expired, or it was already received"
         )
-    if resp.status_code != 200:
-        raise RuntimeError(f"manifest download returned {resp.status_code}")
-    return resp.content
+    if status != 200:
+        raise RuntimeError(f"manifest download returned {status}")
+    return body
 
 
 def _download_shards(
-    session: requests.Session,
+    node_sessions: NodeSessions,
     pool: ThreadPoolExecutor,
     segment: ManifestSegment,
     data_shards: int,
@@ -469,14 +502,21 @@ def _download_shards(
     content doesn't match the manifest hash (corrupt or malicious node) are
     discarded, and we stop as soon as data_shards good shards have arrived."""
     shards: List[Optional[bytes]] = [None] * (data_shards + parity_shards)
+    shard_size = -(-segment.encrypted_size // data_shards)
+    refused: List[str] = []
 
     def fetch_shard(shard: ManifestShard) -> Optional[bytes]:
         try:
-            resp = session.get(f"{shard.node}/shard/{shard.hash}", timeout=TIMEOUT)
-        except requests.RequestException:
+            status, body = _get_limited(node_sessions.for_node(shard.node), _shard_url(shard), shard_size)
+        except requests.ConnectionError as e:
+            if "not a public address" in str(e):
+                refused.append(f"storage node {shard.node} is a private or internal address; "
+                               "add it to HELPEER_STORAGE_NODES if you trust it")
             return None
-        if resp.status_code == 200 and crypto.content_hash(resp.content) == shard.hash:
-            return resp.content
+        except (requests.RequestException, ValueError):
+            return None
+        if body is not None and crypto.content_hash(body) == shard.hash:
+            return body
         return None
 
     futures = {pool.submit(fetch_shard, s): s.index for s in segment.shards}
@@ -494,6 +534,7 @@ def _download_shards(
     if have < data_shards:
         raise RuntimeError(
             f"segment {segment.id}: only {have} of {data_shards} needed shards are available"
+            + (f" ({refused[0]})" if refused else "")
         )
     return shards
 

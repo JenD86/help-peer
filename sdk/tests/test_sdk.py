@@ -6,7 +6,9 @@ import tempfile
 import shutil
 import pytest
 
-from helppeer import crypto, erasure, manifest, validator
+import requests
+
+from helppeer import client, crypto, erasure, manifest, nodes, validator
 from helppeer.config import configure, get_config
 
 
@@ -183,6 +185,7 @@ class TestManifest:
         lambda m: setattr(m, "version", 1),
         lambda m: setattr(m, "ack_secret", ""),
         lambda m: setattr(m, "delete_token", "x"),
+        lambda m: m.files[0].segments[0].shards.append(manifest.ManifestShard(0, "ab" * 32, "file:///etc/passwd")),
     ])
     def test_validate_rejects_inconsistent_manifests(self, mutate):
         m = _valid_manifest()
@@ -200,6 +203,85 @@ def _valid_manifest():
             manifest.ManifestSegment(id="seg_000001", original_size=36, encrypted_size=64),
         ])],
     )
+
+
+@pytest.fixture
+def local_server():
+    """A local HTTP server: /shard/small returns 10 bytes, /shard/big 1 MB,
+    /shard/redirect redirects to /shard/small."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/shard/redirect":
+                self.send_response(302)
+                self.send_header("Location", "/shard/small")
+                self.end_headers()
+                return
+            body = b"x" * (10 if self.path == "/shard/small" else 1 << 20)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except ConnectionError:
+                pass  # the client stopped reading an oversized body, as it should
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+
+
+class TestNodes:
+    def test_public_ips(self):
+        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700::1111", "::ffff:8.8.8.8"]:
+            assert nodes.is_public_ip(ip), ip
+        for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1",
+                   "0.0.0.0", "255.255.255.255", "224.0.0.1", "240.0.0.1", "192.0.2.1", "198.18.0.1",
+                   "::1", "::", "fe80::1", "fd00::1", "ff02::1", "::ffff:127.0.0.1", "::ffff:169.254.169.254",
+                   "64:ff9b::a00:1", "::127.0.0.1", "2001:db8::1", "not an ip"]:
+            assert not nodes.is_public_ip(ip), ip
+
+    def test_check_node_url(self):
+        for ok in ["https://node.example.com", "http://1.2.3.4:7001", "https://example.com/node1"]:
+            nodes.check_node_url(ok)
+        for bad in ["", "n", None, "file:///etc/passwd", "ftp://example.com", "https://user:pw@example.com",
+                    "https://example.com?x=1", "https://example.com#x", "http://example.com:99999"]:
+            with pytest.raises(ValueError):
+                nodes.check_node_url(bad)
+
+    def test_configured_nodes_are_trusted(self):
+        ns = nodes.NodeSessions(["http://127.0.0.1:7001", "https://Node.example.com/"], "trusted", "public")
+        assert ns.for_node("http://127.0.0.1:7001") == "trusted"
+        assert ns.for_node("https://node.example.com:443") == "trusted"
+        assert ns.for_node("http://127.0.0.1:7002") == "public"
+        assert ns.for_node("http://node.example.com") == "public"
+
+    def test_public_session_refuses_private_addresses(self, local_server):
+        public = client._public_session()
+        for url in [local_server, local_server.replace("127.0.0.1", "localhost")]:
+            with pytest.raises(requests.ConnectionError, match="not a public address"):
+                client._get_limited(public, url + "/shard/small", 100)
+
+    def test_trusted_node_works_without_redirects_or_oversized_bodies(self, local_server):
+        session = client._session()
+        assert client._get_limited(session, local_server + "/shard/small", 100) == (200, b"x" * 10)
+        assert client._get_limited(session, local_server + "/shard/redirect", 100) == (302, None)
+        with pytest.raises(ValueError, match="larger than"):
+            client._get_limited(session, local_server + "/shard/big", 1000)
+
+    def test_download_shards_from_untrusted_private_node_fails_clearly(self, local_server):
+        from concurrent.futures import ThreadPoolExecutor
+        seg = manifest.ManifestSegment(id="seg_000000", original_size=10, encrypted_size=38, shards=[
+            manifest.ManifestShard(i, "ab" * 32, local_server) for i in range(12)])
+        ns = nodes.NodeSessions([], client._session(), client._public_session())
+        with ThreadPoolExecutor(4) as pool, pytest.raises(RuntimeError, match="private or internal address"):
+            client._download_shards(ns, pool, seg, 8, 4)
 
 
 class TestValidator:

@@ -77,16 +77,18 @@ pub async fn post(client: &Client, url: &str, body: Vec<u8>, what: &str) -> Resu
     Err(last_err)
 }
 
-/// GET `url`, retrying transient failures. Returns Ok(None) on 404.
-pub async fn get(client: &Client, url: &str, what: &str) -> Result<Option<Vec<u8>>, String> {
+/// GET `url`, retrying transient failures. Returns Ok(None) on 404. A body
+/// larger than `max_bytes` is an error, so a server can't exhaust our memory.
+pub async fn get(client: &Client, url: &str, what: &str, max_bytes: usize) -> Result<Option<Vec<u8>>, String> {
     let mut last_err = String::new();
     for attempt in 0..ATTEMPTS {
         backoff(attempt).await;
         match client.get(url).send().await {
             Ok(resp) if resp.status() == StatusCode::NOT_FOUND => return Ok(None),
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(b) => return Ok(Some(b.to_vec())),
-                Err(e) => last_err = format!("{} failed reading body: {}", what, e),
+            Ok(resp) if resp.status().is_success() => match read_limited(resp, max_bytes).await {
+                Ok(b) => return Ok(Some(b)),
+                Err(ReadError::TooLarge) => return Err(format!("{} is larger than {} bytes", what, max_bytes)),
+                Err(ReadError::Http(e)) => last_err = format!("{} failed reading body: {}", what, e),
             },
             Ok(resp) if retryable(resp.status()) => {
                 last_err = format!("{} returned status {}", what, resp.status())
@@ -96,4 +98,23 @@ pub async fn get(client: &Client, url: &str, what: &str) -> Result<Option<Vec<u8
         }
     }
     Err(last_err)
+}
+
+enum ReadError {
+    TooLarge,
+    Http(reqwest::Error),
+}
+
+async fn read_limited(mut resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, ReadError> {
+    if resp.content_length().map_or(false, |n| n > max_bytes as u64) {
+        return Err(ReadError::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(ReadError::Http)? {
+        if body.len() + chunk.len() > max_bytes {
+            return Err(ReadError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }

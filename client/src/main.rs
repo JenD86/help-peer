@@ -5,6 +5,7 @@ mod download;
 mod erasure;
 mod http;
 mod manifest;
+mod nodes;
 mod resume;
 mod upload;
 mod validator;
@@ -269,12 +270,12 @@ async fn main() {
         }
 
         Commands::Receive { code, output } => {
-            let (relay, _) = resolve_servers(&cli, api.as_ref()).await;
+            let (relay, nodes) = resolve_servers(&cli, api.as_ref()).await;
             out.say(&format!("Help Peer — Receiving into: {}", output.display()));
             out.say(&format!("Relay: {}", relay));
             out.say("");
 
-            let result = match download::download_transfer(code, output, &relay).await {
+            let result = match download::download_transfer(code, output, &relay, &nodes).await {
                 Ok(r) => r,
                 Err(e) => out.fail("Download", e),
             };
@@ -345,8 +346,8 @@ async fn main() {
         }
 
         Commands::Cancel { code } => {
-            let (relay, _) = resolve_servers(&cli, api.as_ref()).await;
-            let r = match cancel::cancel_transfer(code, &relay).await {
+            let (relay, nodes) = resolve_servers(&cli, api.as_ref()).await;
+            let r = match cancel::cancel_transfer(code, &relay, &nodes).await {
                 Ok(r) => r,
                 Err(e) => out.fail("Cancel", e),
             };

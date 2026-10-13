@@ -8,6 +8,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+from .nodes import check_node_url
 
 # Version 2 introduced Argon2id key derivation, ack_secret and delete_token.
 MANIFEST_VERSION = 2
@@ -19,6 +20,8 @@ NONCE_SIZE = 12
 TAG_SIZE = 16
 # Largest segment size a receiver will accept, to bound memory use.
 MAX_SEGMENT_SIZE = 256 * 1024 * 1024
+# Largest encrypted manifest we'll download (the relay's default limit is 32 MiB).
+MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 
 # File extensions blocked to reduce abuse risk (media sharing).
 # Not a security boundary — just a deterrent.
@@ -195,6 +198,10 @@ class Manifest:
                     seen.add(sh.index)
                     if not isinstance(sh.hash, str) or not _HEX_HASH.match(sh.hash):
                         raise bad("invalid shard hash")
+                    try:
+                        check_node_url(sh.node)
+                    except ValueError as e:
+                        raise bad(f"invalid storage node: {e}")
 
         if total != self.total_bytes:
             raise ValueError("manifest total_bytes does not match its files")

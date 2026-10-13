@@ -6,7 +6,8 @@ use tokio::task::JoinSet;
 
 use crate::crypto;
 use crate::http;
-use crate::manifest::Manifest;
+use crate::manifest::{self, Manifest};
+use crate::nodes::NodeClients;
 
 /// Shard deletions to run at once.
 const DELETE_CONCURRENCY: usize = 16;
@@ -24,12 +25,13 @@ pub struct CancelResult {
 /// Withdraw a transfer before its TTL: remove the manifest from the relay so
 /// nobody can start receiving it, then delete its shards using the
 /// manifest's delete token.
-pub async fn cancel_transfer(code: &str, relay_url: &str) -> Result<CancelResult, String> {
+pub async fn cancel_transfer(code: &str, relay_url: &str, configured_nodes: &[String]) -> Result<CancelResult, String> {
     let client = http::client()?;
+    let node_clients = NodeClients::new(configured_nodes)?;
     let (k_data, k_index) = crypto::derive_keys(code);
     let manifest_url = format!("{}/manifest/{}", relay_url, crypto::relay_hash(&k_index));
 
-    let encrypted_manifest = http::get(&client, &manifest_url, "manifest download")
+    let encrypted_manifest = http::get(&client, &manifest_url, "manifest download", manifest::MAX_MANIFEST_BYTES)
         .await?
         .ok_or("transfer not found: the code is wrong, it expired, or it was already received")?;
     let manifest = Manifest::from_json(&crypto::decrypt_segment(&k_data, &encrypted_manifest)?)?;
@@ -49,12 +51,22 @@ pub async fn cancel_transfer(code: &str, relay_url: &str) -> Result<CancelResult
     }
 
     // Then delete every shard.
+    let mut result = CancelResult {
+        transfer_name: manifest.transfer_name.clone(),
+        shards_deleted: 0,
+        shards_already_gone: 0,
+        shards_failed: 0,
+    };
     let limit = Arc::new(Semaphore::new(DELETE_CONCURRENCY));
     let mut tasks = JoinSet::new();
     for shard in manifest.files.iter().flat_map(|f| &f.segments).flat_map(|s| &s.shards) {
-        let client = client.clone();
+        // A node we may not contact counts as failed; its shard expires with the TTL.
+        let Ok(client) = node_clients.for_node(&shard.node).cloned() else {
+            result.shards_failed += 1;
+            continue;
+        };
         let limit = limit.clone();
-        let url = format!("{}/shard/{}", shard.node, shard.hash);
+        let url = format!("{}/shard/{}", shard.node.trim_end_matches('/'), shard.hash);
         let token = manifest.delete_token.clone();
         tasks.spawn(async move {
             let _permit = limit.acquire_owned().await;
@@ -62,12 +74,6 @@ pub async fn cancel_transfer(code: &str, relay_url: &str) -> Result<CancelResult
         });
     }
 
-    let mut result = CancelResult {
-        transfer_name: manifest.transfer_name.clone(),
-        shards_deleted: 0,
-        shards_already_gone: 0,
-        shards_failed: 0,
-    };
     while let Some(outcome) = tasks.join_next().await {
         match outcome {
             Ok(Ok(StatusCode::NO_CONTENT)) => result.shards_deleted += 1,

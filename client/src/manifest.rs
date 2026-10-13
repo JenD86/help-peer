@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 use crate::crypto;
+use crate::nodes;
 
 /// Manifest format version. Version 2 introduced Argon2id key derivation,
 /// `ack_secret` and `delete_token`.
@@ -81,6 +82,8 @@ pub const MAX_MESSAGE_CHARS: usize = 2000;
 
 /// Largest segment size a receiver will accept, to bound memory use.
 const MAX_SEGMENT_SIZE: usize = 256 * 1024 * 1024;
+/// Largest encrypted manifest we'll download (the relay's default limit is 32 MiB).
+pub const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 
 impl Manifest {
     /// Build a manifest for a file or a directory.
@@ -197,6 +200,9 @@ impl Manifest {
                     seen[idx] = true;
                     if !is_hex_hash(&shard.hash) {
                         return Err(bad("invalid shard hash"));
+                    }
+                    if let Err(e) = nodes::check_node_url(&shard.node) {
+                        return Err(bad(&format!("invalid storage node: {}", e)));
                     }
                 }
             }
@@ -456,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_inconsistent_manifests() {
-        let shard = |index| ManifestShard { index, hash: "ab".repeat(32), node: "n".into() };
+        let shard = |index| ManifestShard { index, hash: "ab".repeat(32), node: "https://n.example".into() };
         let cases: Vec<(&str, Box<dyn Fn(&mut Manifest)>)> = vec![
             ("total", Box::new(|m| m.total_bytes = 5)),
             ("erasure", Box::new(|m| m.erasure_parity_shards = 2)),
@@ -471,6 +477,9 @@ mod tests {
             ("ack secret", Box::new(|m| m.ack_secret = String::new())),
             ("delete token", Box::new(|m| m.delete_token = "x".into())),
             ("message", Box::new(|m| m.message = Some("x".repeat(MAX_MESSAGE_CHARS + 1)))),
+            ("node", Box::new(move |m| {
+                m.files[0].segments[0].shards = vec![ManifestShard { node: "file:///etc/passwd".into(), ..shard(0) }]
+            })),
         ];
         for (name, mutate) in cases {
             let mut m = valid_manifest();

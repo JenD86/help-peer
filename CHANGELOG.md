@@ -2,6 +2,16 @@
 
 Notable changes to Help Peer. Entries marked **Action required** need storage node operators or users to update.
 
+## Unreleased
+
+### CLI and Python SDK: receivers could be made to request internal addresses
+
+A transfer's manifest names the storage nodes its shards are on, and receivers fetched from whatever URLs it listed. A malicious sender (or, for transfers sent to a username, the website) could make a receiver's client send requests to its own network, such as `localhost` services, the router or a cloud metadata endpoint. The client never saw the responses unless they matched a shard's hash, but the requests themselves could have side effects.
+
+Receivers (`receive` and `cancel`) now only contact a storage node if the receiver configured it (`--nodes`, `HELPEER_STORAGE_NODES` or the logged-in site's list) or it resolves to a public address, checked at connection time. Shard requests no longer follow redirects or go through proxies, and downloads stop once they exceed the size the manifest says to expect. The web app was not affected: its backend already only fetches from its own registered nodes.
+
+If you receive from storage nodes on a private network, list them in `--nodes` or `HELPEER_STORAGE_NODES`.
+
 ## 2026-10-13
 
 ### Storage node: shard expiry could be extended without the shard's content — **Action required for node operators**
