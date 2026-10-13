@@ -94,10 +94,22 @@ pub async fn get(client: &Client, url: &str, what: &str, max_bytes: usize) -> Re
                 last_err = format!("{} returned status {}", what, resp.status())
             }
             Ok(resp) => return Err(format!("{} returned status {}", what, resp.status())),
-            Err(e) => last_err = format!("{} failed: {}", what, e),
+            Err(e) => last_err = format!("{} failed: {}", what, with_causes(&e)),
         }
     }
     Err(last_err)
+}
+
+/// An error with its causes: reqwest's own message leaves out why a request
+/// failed (e.g. a DNS resolver refusing an address).
+pub fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut msg = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        msg = format!("{}: {}", msg, cause);
+        source = cause.source();
+    }
+    msg
 }
 
 enum ReadError {

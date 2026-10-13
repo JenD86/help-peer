@@ -193,22 +193,32 @@ async fn download_shards_for_segment(
         let hash = shard.hash.clone();
         let index = shard.index as usize;
 
+        let node = shard.node.clone();
         tasks.spawn(async move {
             match http::get(&client, &url, "shard download", shard_size).await {
-                Ok(Some(data)) if crypto::content_hash(&data) == hash => Some((index, data)),
-                _ => None,
+                Ok(Some(data)) if crypto::content_hash(&data) == hash => Ok((index, data)),
+                // Refused by the public-only resolver: worth explaining if the segment fails.
+                Err(e) if e.contains("not a public address") => Err(Some(format!(
+                    "storage node {} is a private or internal address; add it to --nodes / HELPEER_STORAGE_NODES if you trust it",
+                    node
+                ))),
+                _ => Err(None),
             }
         });
     }
 
     let mut have = 0;
     while let Some(result) = tasks.join_next().await {
-        if let Ok(Some((index, data))) = result {
-            shards[index] = Some(data);
-            have += 1;
-            if have == crypto::DATA_SHARDS {
-                break; // dropping `tasks` cancels the remaining downloads
+        match result {
+            Ok(Ok((index, data))) => {
+                shards[index] = Some(data);
+                have += 1;
+                if have == crypto::DATA_SHARDS {
+                    break; // dropping `tasks` cancels the remaining downloads
+                }
             }
+            Ok(Err(Some(e))) => refused = Some(e),
+            _ => {}
         }
     }
 
