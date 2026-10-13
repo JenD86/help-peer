@@ -105,6 +105,15 @@ curl http://localhost:7001/health`}</Code>
           <a href={`${REPO}#storage-nodes`} className="text-indigo-600">README</a>.
         </p>
       </section>
+
+      <section className="mt-16">
+        <h2 className="text-2xl font-bold text-gray-900 mb-2">Open source</h2>
+        <p className="text-gray-600">
+          Help Peer is open source, and contributors are welcome — bug reports, fixes, docs and new features alike.
+          Browse the code, open an issue or send a pull request on{' '}
+          <a href={REPO} className="text-indigo-600">GitHub</a>.
+        </p>
+      </section>
     </div>
   )
 }
