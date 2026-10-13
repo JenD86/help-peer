@@ -6,9 +6,19 @@ A Python SDK for asynchronously sharing large file dumps (AI model weights) via 
 
 ## Installation
 
+From a clone of this repo:
+
 ```bash
-pip install helppeer
+pip install ./sdk
 ```
+
+Or straight from GitHub:
+
+```bash
+pip install "git+https://github.com/JenD86/help-peer#subdirectory=sdk"
+```
+
+Don't use the `helppeer` 0.1.0 package on PyPI: it predates the current protocol and has weak transfer codes. It has been yanked.
 
 ## Quick Start
 

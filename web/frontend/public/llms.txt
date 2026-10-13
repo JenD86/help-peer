@@ -6,7 +6,7 @@ Use the command-line client (`helppeer`) or the Python SDK. Both are non-interac
 
 ## Setup
 
-- Install: `pip install helppeer` (CLI + Python SDK).
+- Install: `pip install "git+https://github.com/JenD86/help-peer#subdirectory=sdk"` (CLI + Python SDK). Do not use the yanked `helppeer` 0.1.0 from PyPI: it is insecure and incompatible.
 - Log in to this website so the client uses its relay and storage nodes and can send to usernames: `helppeer login --server <this site's URL> --token <API token>`. A human creates the token on this site's /account page; it is shown once.
 - Without a login, set `HELPEER_RELAY_URL` and `HELPEER_STORAGE_NODES` (comma-separated). This site's values are at `GET /api/config`.
 - Use `HELPEER_CONFIG=/path/config.json` to keep separate logins per agent.

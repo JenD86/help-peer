@@ -19,7 +19,7 @@ It's built to be driven by **AI agents** as much as by people: every command is 
 **Install** one client (both have the same commands and JSON output):
 
 ```bash
-pip install helppeer           # Python CLI + SDK, or `pip install ./sdk` from this repo
+pip install ./sdk              # Python CLI + SDK, from this repo
 cargo install --path client    # Rust CLI, from this repo
 ```
 
@@ -223,7 +223,7 @@ helppeer.configure(
 )
 ```
 
-**Python CLI** (installed via `pip install helppeer`):
+**Python CLI** (installed via `pip install ./sdk`):
 ```bash
 helppeer send ./my-model --name "Llama-3-70B"
 helppeer receive orbit-velvet-zoom-candle-harbor-ember --output ./received/
@@ -343,7 +343,7 @@ The CLI and SDK spread shards round-robin over the list from `/api/config`, so t
 - **Relay Server** (Go): Stores encrypted manifests indexed by `BLAKE3(K_index)` until receivers confirm or they expire. Never sees plaintext.
 - **Storage Node** (Go): Stores encrypted shards with TTL. Zero-knowledge — cannot decrypt shard contents. Anyone can run one; see [Storage Nodes](#storage-nodes).
 - **Client** (Rust): Handles key derivation from the transfer code, AES-256-GCM encryption, Reed-Solomon erasure coding (8+4), manifest building, upload/download, and file validation.
-- **Python SDK**: Pure Python implementation of the full protocol (with numpy for fast erasure coding). `pip install helppeer` — zero external binaries required. Includes CLI, programmatic API, and agent-friendly structured output.
+- **Python SDK**: Pure Python implementation of the full protocol (with numpy for fast erasure coding). `pip install ./sdk` — zero external binaries required. Includes CLI, programmatic API, and agent-friendly structured output.
 - **Web** (React + Go): The browser derives keys and encrypts; the Go backend erasure-codes ciphertext, talks to the relay and storage nodes, and handles login and email notifications.
 
 `protocol/test-vectors.json` holds key-derivation and erasure-coding vectors that the Rust, Python and Go test suites all check, so the implementations can't drift apart.
@@ -486,7 +486,7 @@ help-peer/
 │       ├── upload.rs                          # Shard upload pipeline
 │       ├── download.rs                        # Shard download + reconstruction
 │       └── validator.rs                       # Pluggable file validators
-├── sdk/                                       # Python SDK (pip install helppeer)
+├── sdk/                                       # Python SDK (pip install ./sdk)
 │   ├── pyproject.toml
 │   ├── src/helppeer/
 │   │   ├── __init__.py                        # Public API: send(), receive(), configure()
@@ -558,7 +558,7 @@ diff -r /tmp/test-model /tmp/received-py
 - [x] Safetensors validation
 - [x] Multi-file directory transfer
 - [x] BLAKE3 hash verification
-- [x] Python SDK (pip install helppeer)
+- [x] Python SDK
 - [x] Rust CLI --json mode for agent integration
 - [x] Web frontend (React + Go, browser-side encryption, email notifications, multi-recipient)
 - [x] Cross-client compatibility (CLI, Python and web share codes, with shared test vectors)
