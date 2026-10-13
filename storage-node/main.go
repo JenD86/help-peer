@@ -228,15 +228,11 @@ func (s *StorageNode) putShard(w http.ResponseWriter, req *http.Request, hash st
 		return
 	}
 
-	// Check if shard already exists (dedup). The hash is the content's BLAKE3,
-	// so an identical upload just extends the TTL.
-	if _, err := s.store.Exists(hash); err == nil {
-		if err := s.store.Touch(hash, ttl); err != nil {
-			log.Printf("Failed to refresh shard %s: %v", hash[:12], err)
-		}
-		w.WriteHeader(http.StatusOK)
-		return
-	}
+	// Re-uploading an existing shard just extends its TTL (the stores dedup in
+	// Put), but only once the body has been read and verified below: otherwise
+	// anyone who knew a hash could keep its shard alive forever with empty PUTs.
+	_, err := s.store.Exists(hash)
+	exists := err == nil
 
 	contentLength := req.ContentLength
 	if contentLength <= 0 {
@@ -249,11 +245,14 @@ func (s *StorageNode) putShard(w http.ResponseWriter, req *http.Request, hash st
 	}
 
 	// Reserve the space up front so concurrent uploads can't overshoot capacity.
-	if !s.reserve(contentLength) {
-		http.Error(w, "insufficient storage", http.StatusInsufficientStorage)
-		return
+	// A duplicate takes no new space, so a full node can still refresh it.
+	if !exists {
+		if !s.reserve(contentLength) {
+			http.Error(w, "insufficient storage", http.StatusInsufficientStorage)
+			return
+		}
+		defer s.release(contentLength)
 	}
-	defer s.release(contentLength)
 
 	data, err := io.ReadAll(http.MaxBytesReader(w, req.Body, contentLength))
 	if err != nil {
@@ -275,6 +274,10 @@ func (s *StorageNode) putShard(w http.ResponseWriter, req *http.Request, hash st
 		return
 	}
 
+	if exists {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	log.Printf("Stored shard %s (%d bytes)", hash[:12], written)
 	w.WriteHeader(http.StatusCreated)
 }

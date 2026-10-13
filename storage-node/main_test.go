@@ -114,6 +114,40 @@ func TestDedupRefreshesTTL(t *testing.T) {
 	}
 }
 
+func TestRefreshRequiresContent(t *testing.T) {
+	_, store, base := newTestNode(t, 1<<20)
+	data := []byte("keep me only if you have me")
+	h := hashOf(data)
+	put(t, base+"/shard/"+h, data)
+
+	store.mu.Lock()
+	soon := time.Now().Add(time.Second)
+	store.shardIndex[h] = soon
+	store.mu.Unlock()
+
+	if code := put(t, base+"/shard/"+h, nil); code != 400 {
+		t.Fatalf("empty re-put: %d", code)
+	}
+	if code := put(t, base+"/shard/"+h, []byte("wrong content")); code != 400 {
+		t.Fatalf("wrong-content re-put: %d", code)
+	}
+	store.mu.Lock()
+	expiry := store.shardIndex[h]
+	store.mu.Unlock()
+	if !expiry.Equal(soon) {
+		t.Fatalf("TTL refreshed without the content: expires in %s", time.Until(expiry))
+	}
+}
+
+func TestDuplicateFitsOnFullNode(t *testing.T) {
+	_, _, base := newTestNode(t, 100)
+	a := bytes.Repeat([]byte("a"), 80)
+	put(t, base+"/shard/"+hashOf(a), a)
+	if code := put(t, base+"/shard/"+hashOf(a), a); code != 200 {
+		t.Fatalf("duplicate on full node: %d", code)
+	}
+}
+
 func TestRestartKeepsOriginalExpiry(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := NewDiskStore(dir, 3600)
