@@ -59,6 +59,7 @@ type HealthResponse struct {
 
 func main() {
 	port := envOr("RELAY_PORT", "7000")
+	trustProxy = os.Getenv("RELAY_TRUST_PROXY") == "1"
 	dataDir := envOr("RELAY_DIR", "/tmp/helppeer-relay")
 
 	if err := os.MkdirAll(dataDir, 0755); err != nil {

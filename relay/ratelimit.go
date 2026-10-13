@@ -6,11 +6,28 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
+// trustProxy makes clientIP use X-Forwarded-For (RELAY_TRUST_PROXY=1). Behind
+// a reverse proxy every client otherwise looks like the proxy, so they'd
+// share one set of limits. Only enable it when the relay can't be reached
+// except through the proxy, or clients could pick their own address.
+var trustProxy bool
+
 func clientIP(req *http.Request) string {
+	if trustProxy {
+		// The proxy appends the address it saw, so the last entry is the one
+		// we can trust; anything earlier was sent by the client.
+		if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if ip := strings.TrimSpace(parts[len(parts)-1]); net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
+	}
 	host, _, err := net.SplitHostPort(req.RemoteAddr)
 	if err != nil {
 		return req.RemoteAddr

@@ -196,7 +196,7 @@ The relay, storage node and web backend all speak plain HTTP and expect a TLS-te
 
    nginx, or NGINX Proxy Manager, works the same way; raise `client_max_body_size` to at least `100m`, since web uploads send 64 MB segments, and enable HSTS on the web host.
 2. **Keep the services off the public internet**: publish their ports on `127.0.0.1` only (e.g. `127.0.0.1:8080:8080` in `docker-compose.yml`), or firewall them, so nobody can bypass the proxy over plain HTTP.
-3. **Tell the services their public URLs** in `.env`: `WEB_BASE_URL=https://help.example.com`, `RELAY_URL_PUBLIC=https://relay.example.com` and `STORAGE_NODES_PUBLIC=https://node.example.com`, so login links, manifests and `/api/config` use HTTPS. Set `WEB_TRUST_PROXY=1` so the web backend rate-limits real client addresses.
+3. **Tell the services their public URLs** in `.env`: `WEB_BASE_URL=https://help.example.com`, `RELAY_URL_PUBLIC=https://relay.example.com` and `STORAGE_NODES_PUBLIC=https://node.example.com`, so login links, manifests and `/api/config` use HTTPS. Set `WEB_TRUST_PROXY=1` and `RELAY_TRUST_PROXY=1` so the web backend and relay rate-limit real client addresses rather than the proxy's (only once step 2 is done).
 
 ### Transfer Files
 
@@ -407,6 +407,7 @@ The CLI and SDK spread shards round-robin over the list from `/api/config`, so t
 | `RELAY_MAX_MANIFEST_BYTES` | `33554432` (32MB) | Largest manifest accepted |
 | `RELAY_MISS_LIMIT` | `30` | Failed lookups/confirmations allowed per client IP per minute before returning 429 |
 | `RELAY_PUT_LIMIT` | `120` | Manifest uploads allowed per client IP per minute (`0` = unlimited) |
+| `RELAY_TRUST_PROXY` | off | Set to `1` behind a reverse proxy so rate limits use the client address from `X-Forwarded-For` (otherwise every CLI/SDK user shares the proxy's limits). Leave off if the relay is reachable directly, or clients can spoof their address |
 | `RELAY_TRUSTED_TOKEN` | — | Shared secret; requests carrying it in `X-Relay-Token` (i.e. from your web backend) skip the per-IP limits |
 | `RELAY_MAX_TOTAL_BYTES` | `1073741824` (1GB) | Total manifest storage; uploads get 507 when full |
 

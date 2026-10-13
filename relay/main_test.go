@@ -144,6 +144,43 @@ func TestFailedLookupRateLimit(t *testing.T) {
 	}
 }
 
+func TestTrustProxyLimitsEachClient(t *testing.T) {
+	_, srv := newTestRelay(t)
+	miss := func(xff string) int {
+		return do(t, "GET", srv.URL+"/manifest/"+testHash, nil, map[string]string{"X-Forwarded-For": xff}).StatusCode
+	}
+
+	// Without RELAY_TRUST_PROXY the header is ignored: everyone behind the
+	// proxy shares one limit.
+	for i := 0; i < 3; i++ {
+		miss("203.0.113.1")
+	}
+	if code := miss("203.0.113.2"); code != 429 {
+		t.Fatalf("header trusted by default: %d", code)
+	}
+
+	trustProxy = true
+	t.Cleanup(func() { trustProxy = false })
+	_, srv = newTestRelay(t)
+	for i := 0; i < 3; i++ {
+		if code := miss("203.0.113.1"); code != 404 {
+			t.Fatalf("miss %d: %d", i, code)
+		}
+	}
+	if code := miss("203.0.113.1"); code != 429 {
+		t.Fatalf("client over its limit: %d", code)
+	}
+	// Another client behind the same proxy has its own limit...
+	if code := miss("203.0.113.2"); code != 404 {
+		t.Fatalf("other client blocked: %d", code)
+	}
+	// ...and a client can't escape its limit by sending its own header: the
+	// proxy appends the real address last.
+	if code := miss("198.51.100.7, 203.0.113.1"); code != 429 {
+		t.Fatalf("spoofed earlier entry used: %d", code)
+	}
+}
+
 func TestHealthCountsManifestsOnly(t *testing.T) {
 	relay, srv := newTestRelay(t)
 	do(t, "PUT", srv.URL+"/manifest/"+testHash, []byte("data"), nil)

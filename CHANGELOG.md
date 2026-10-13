@@ -4,6 +4,10 @@ Notable changes to Help Peer. Entries marked **Action required** need storage no
 
 ## Unreleased
 
+### Relay: per-client rate limits behind a reverse proxy
+
+The relay limits failed lookups (code guessing) and uploads per client address, but behind a reverse proxy every CLI and SDK user looked like the proxy, so one client could exhaust the limit for all of them. With `RELAY_TRUST_PROXY=1` the relay uses the address the proxy reports in `X-Forwarded-For`. Off by default; only enable it when the relay can't be reached except through the proxy.
+
 ### Python SDK: fewer dependencies
 
 `reedsolo` (never imported) and `hkdf` (unmaintained since 2015) are no longer dependencies; key derivation uses the HKDF from `cryptography`, which the SDK already required. Keys are unchanged, as the shared test vectors confirm.
