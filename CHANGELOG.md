@@ -4,6 +4,10 @@ Notable changes to Help Peer. Entries marked **Action required** need storage no
 
 ## Unreleased
 
+### Per-shard delete tokens (web)
+
+Every shard of a transfer used to be stored with the same delete-token hash, so storage nodes, or anyone comparing several nodes' data, could tell which shards belonged to the same transfer. Web uploads now give each shard its own token, derived from the transfer's delete token and the shard's hash (SPEC 4.4), and mark the manifest with `shard_delete_tokens`. Storage nodes need no update, and every client can still receive these transfers. The CLI and Python SDK follow in the next release; until then, they can't cancel new web transfers early (the transfer is still withdrawn at once, and its shards expire within 24 hours).
+
 ### Relay: per-client rate limits behind a reverse proxy
 
 The relay limits failed lookups (code guessing) and uploads per client address, but behind a reverse proxy every CLI and SDK user looked like the proxy, so one client could exhaust the limit for all of them. With `RELAY_TRUST_PROXY=1` the relay uses the address the proxy reports in `X-Forwarded-For`. Off by default; only enable it when the relay can't be reached except through the proxy.

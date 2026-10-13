@@ -55,6 +55,16 @@ export function secretHash(secretHex: string): string {
   return toHex(blake3(bytes))
 }
 
+// Per-shard delete tokens (protocol/SPEC.md §2.3). The web backend erasure-codes
+// segments, so it derives each shard's token from this key; storage nodes then
+// store a different token hash per shard and can't group a transfer's shards.
+const SHARD_DELETE_KEY_CONTEXT = 'help-peer 2026-10-13 shard delete key'
+
+export function shardDeleteKey(deleteTokenHex: string): string {
+  const bytes = new Uint8Array(deleteTokenHex.match(/../g)!.map(h => parseInt(h, 16)))
+  return toHex(blake3(bytes, { context: enc.encode(SHARD_DELETE_KEY_CONTEXT) }))
+}
+
 // Relay hash = BLAKE3(K_index) hex-encoded
 export function relayHash(kIndex: ArrayBuffer): string {
   return toHex(blake3(new Uint8Array(kIndex)))

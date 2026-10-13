@@ -1226,3 +1226,116 @@ func TestEmailMessageBlock(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// Per-shard delete tokens: shared vectors (also checked by the Rust client,
+// Python SDK and web app).
+func TestSharedShardDeleteTokenVectors(t *testing.T) {
+	raw, err := os.ReadFile("../../protocol/test-vectors.json")
+	if err != nil {
+		t.Skip("not running from the repo")
+	}
+	var v struct {
+		ShardDeleteTokens struct {
+			Context        string `json:"context"`
+			DeleteToken    string `json:"delete_token"`
+			ShardDeleteKey string `json:"shard_delete_key"`
+			Shards         []struct {
+				ShardHash      string `json:"shard_hash"`
+				ShardToken     string `json:"shard_token"`
+				ShardTokenHash string `json:"shard_token_hash"`
+			} `json:"shards"`
+		} `json:"shard_delete_tokens"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	sv := v.ShardDeleteTokens
+	if sv.Context != shardDeleteKeyContext {
+		t.Fatalf("context %q, vectors say %q", shardDeleteKeyContext, sv.Context)
+	}
+	dt, _ := hex.DecodeString(sv.DeleteToken)
+	key := shardDeleteKey(dt)
+	if hex.EncodeToString(key) != sv.ShardDeleteKey {
+		t.Fatalf("shard_delete_key %x", key)
+	}
+	for _, s := range sv.Shards {
+		if got := hex.EncodeToString(shardToken(key, s.ShardHash)); got != s.ShardToken {
+			t.Errorf("shard_token for %s: %s", s.ShardHash, got)
+		}
+		if got := shardTokenHash(key, s.ShardHash); got != s.ShardTokenHash {
+			t.Errorf("shard_token_hash for %s: %s", s.ShardHash, got)
+		}
+	}
+}
+
+func TestPerShardDeleteTokens(t *testing.T) {
+	e := newTestEnv(t)
+	deleteToken := bytes.Repeat([]byte{5}, 32)
+	key := shardDeleteKey(deleteToken)
+	ackSecret := bytes.Repeat([]byte{4}, 32)
+	ackSum := blake3.Sum256(ackSecret)
+
+	segment := make([]byte, 5000)
+	rand.Read(segment)
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/api/upload/segment", bytes.NewReader(segment))
+	req.Header.Set("X-Shard-Delete-Key", hex.EncodeToString(key))
+	req.Header.Set("X-Upload-Ticket", e.uploadTicket())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var up SegmentUploadResponse
+	decode(t, resp, &up)
+
+	// Each shard is stored with its own token hash, so they can't be grouped.
+	seen := map[string]bool{}
+	for _, sh := range up.Shards {
+		stored := e.node.tokens[sh.Hash]
+		if stored != shardTokenHash(key, sh.Hash) {
+			t.Fatalf("shard %s stored with %s", sh.Hash, stored)
+		}
+		if seen[stored] {
+			t.Fatalf("two shards share token hash %s", stored)
+		}
+		seen[stored] = true
+	}
+
+	hash := strings.Repeat("ab", 32)
+	cancel := func(perShard bool) map[string]interface{} {
+		e.relay.manifests[hash] = []byte("enc")
+		e.relay.ackHashes[hash] = hex.EncodeToString(ackSum[:])
+		shards := []map[string]string{}
+		for _, sh := range up.Shards {
+			shards = append(shards, map[string]string{"hash": sh.Hash, "node": sh.Node})
+		}
+		var got map[string]interface{}
+		decode(t, e.post(t, "/api/cancel", map[string]interface{}{
+			"manifest_hash": hash, "ack_secret": hex.EncodeToString(ackSecret),
+			"delete_token": hex.EncodeToString(deleteToken), "shard_delete_tokens": perShard, "shards": shards,
+		}, ""), &got)
+		return got
+	}
+	// A client that doesn't know the scheme sends the shared token: refused,
+	// and the shards stay until their TTL.
+	if got := cancel(false); got["shards_failed"] != float64(TotalShards) || len(e.node.shards) != TotalShards {
+		t.Fatalf("legacy cancel of per-shard transfer: %v, %d shards left", got, len(e.node.shards))
+	}
+	if got := cancel(true); got["shards_deleted"] != float64(TotalShards) || len(e.node.shards) != 0 {
+		t.Fatalf("per-shard cancel: %v, %d shards left", got, len(e.node.shards))
+	}
+}
+
+func TestSegmentUploadRejectsBadShardDeleteKey(t *testing.T) {
+	e := newTestEnv(t)
+	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/api/upload/segment", bytes.NewReader(make([]byte, 100)))
+	req.Header.Set("X-Shard-Delete-Key", "not-hex")
+	req.Header.Set("X-Upload-Ticket", e.uploadTicket())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}

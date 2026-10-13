@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,7 +19,10 @@ type CancelRequest struct {
 	ManifestHash string `json:"manifest_hash"`
 	AckSecret    string `json:"ack_secret"`
 	DeleteToken  string `json:"delete_token"`
-	Shards       []struct {
+	// The manifest's shard_delete_tokens flag: each shard's token is derived
+	// from DeleteToken (shardtokens.go) rather than being DeleteToken itself.
+	ShardDeleteTokens bool `json:"shard_delete_tokens"`
+	Shards            []struct {
 		Hash string `json:"hash"`
 		Node string `json:"node"`
 	} `json:"shards"`
@@ -81,6 +85,13 @@ func (s *Server) cancelHandler(w http.ResponseWriter, req *http.Request) {
 
 	// Then delete the shards, on our own storage nodes only (the list comes
 	// from the browser).
+	tokenFor := func(string) string { return body.DeleteToken }
+	if body.ShardDeleteTokens {
+		dt, _ := hex.DecodeString(body.DeleteToken)
+		key := shardDeleteKey(dt)
+		tokenFor = func(shardHash string) string { return hex.EncodeToString(shardToken(key, shardHash)) }
+	}
+
 	var mu sync.Mutex
 	counts := map[string]int{}
 	sem := make(chan struct{}, 16)
@@ -95,14 +106,14 @@ func (s *Server) cancelHandler(w http.ResponseWriter, req *http.Request) {
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(client *http.Client, url string) {
+		go func(client *http.Client, url, token string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			outcome := deleteShard(client, url, body.DeleteToken)
+			outcome := deleteShard(client, url, token)
 			mu.Lock()
 			counts[outcome]++
 			mu.Unlock()
-		}(s.nodes.ClientFor(key), nodeURL+"/shard/"+sh.Hash)
+		}(s.nodes.ClientFor(key), nodeURL+"/shard/"+sh.Hash, tokenFor(sh.Hash))
 	}
 	wg.Wait()
 

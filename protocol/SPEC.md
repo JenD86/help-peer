@@ -161,7 +161,7 @@ X-TTL-Seconds: 86400
 
 `{hash}` = lowercase hex-encoded `BLAKE3(shard_bytes)`. The node verifies it and rejects content that doesn't match, so a hash can't be claimed by different data. `X-TTL-Seconds` can only shorten the node's TTL.
 
-`X-Delete-Token-Hash: {hex}` registers `BLAKE3(delete_token)` (the 32-byte token in the manifest, section 3) as the only credential that can delete the shard early (2.3). If a shard with the same content already exists, its original token is kept.
+`X-Delete-Token-Hash: {hex}` registers `BLAKE3(shard_token)` as the only credential that can delete the shard early (2.3), where `shard_token` is the shard's own delete token (4.4). Every shard gets a different value, so a node can't group a transfer's shards by it. Transfers whose manifest lacks `shard_delete_tokens` (from older clients) registered `BLAKE3(delete_token)` for every shard instead. If a shard with the same content already exists, its original token is kept.
 
 If a node fails during upload, the sender stores that node's shards on the next healthy node instead and records the node actually used in the manifest.
 
@@ -215,15 +215,17 @@ HTTP/1.1 404 Not Found
 
 ### 2.3 DELETE /shard/{hash}
 
-Delete a shard before its TTL. Requires the transfer's delete token, so
-only someone holding the decrypted manifest can delete its shards; shards
-stored without a token can't be deleted early at all.
+Delete a shard before its TTL. Requires the shard's delete token, which only
+someone holding the decrypted manifest can derive; shards stored without a
+token can't be deleted early at all.
 
 **Request:**
 ```
 DELETE /shard/{hash} HTTP/1.1
-X-Delete-Token: {hex delete_token}
+X-Delete-Token: {hex shard_token}
 ```
+
+`shard_token` is derived as in 4.4 when the manifest has `shard_delete_tokens: true`; otherwise it is the manifest's `delete_token` itself. Nodes don't need to know which: they compare `BLAKE3(X-Delete-Token)` with the hash registered at upload.
 
 | Response | Meaning |
 |---|---|
@@ -334,7 +336,8 @@ The manifest is a JSON object created by the sender, encrypted with `K_data` (AE
 | `version` | int | Protocol version (currently 2: Argon2id key derivation, `ack_secret`, `delete_token`) |
 | `transfer_name` | string | Human-readable name for the transfer |
 | `ack_secret` | string | Random 32 bytes, hex; presented to the relay to confirm the download (1.3) |
-| `delete_token` | string | Random 32 bytes, hex; authorizes deleting the transfer's shards (2.3) |
+| `delete_token` | string | Random 32 bytes, hex; each shard's delete token is derived from it (2.3, 4.4) |
+| `shard_delete_tokens` | bool (optional) | `true` when each shard was uploaded with its own token (4.4). Absent in transfers from older clients, whose shards all use `delete_token`. Not a version bump: receivers ignore it, so every version-2 client can still receive |
 | `message` | string (optional) | Sender's note describing the transfer, up to 2000 characters. Untrusted text: receivers must strip control characters before printing it to a terminal |
 | `total_bytes` | u64 | Total size of all files combined |
 | `segment_size` | u32 | Segment size in bytes (default 67108864 = 64MB) |
@@ -386,6 +389,16 @@ Each 64MB segment is encrypted independently:
 ### 4.3 Shard Hashing
 
 Each shard's content hash is `BLAKE3(shard_bytes)` — used for dedup, addressing, and integrity verification.
+
+### 4.4 Per-Shard Delete Tokens
+
+Each shard's delete token is derived from the manifest's `delete_token` and the shard's hash, so the hashes stored on nodes differ per shard:
+
+1. `shard_delete_key = BLAKE3-derive_key(context="help-peer 2026-10-13 shard delete key", key_material=delete_token)` — 32 bytes.
+2. `shard_token = BLAKE3-keyed(key=shard_delete_key, input=shard_hash)` — 32 bytes, where `shard_hash` is the shard's 32-byte BLAKE3 (raw bytes, not hex).
+3. At upload a node is given `BLAKE3(shard_token)` (2.1); to delete, `shard_token` (2.3).
+
+The web backend erasure-codes segments itself, so the browser sends it `shard_delete_key` (header `X-Shard-Delete-Key`) and the backend derives each shard's token. `protocol/test-vectors.json` (`shard_delete_tokens`) has vectors every implementation checks.
 
 ---
 

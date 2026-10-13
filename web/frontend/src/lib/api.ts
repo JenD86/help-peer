@@ -47,7 +47,8 @@ export async function logout(): Promise<void> {
 }
 
 // Upload one encrypted segment; the server erasure-codes it and stores the
-// shards, registering deleteTokenHash so only manifest holders can delete them.
+// shards, each with a delete token derived from shardDeleteKey so only manifest
+// holders can delete them.
 // Announce a transfer of totalBytes (all encrypted segments added up). The
 // server answers with a ticket, or with the reason the upload is not allowed
 // now (too large, too many transfers this hour, daily allowance used up).
@@ -72,14 +73,14 @@ export async function finishUpload(ticket: string): Promise<void> {
 
 export async function uploadSegment(
   encrypted: ArrayBuffer,
-  deleteTokenHash: string,
+  shardDeleteKey: string,
   ticket: string
 ): Promise<{ encrypted_size: number; shards: ShardInfo[] }> {
   const resp = await request('/api/upload/segment', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/octet-stream',
-      'X-Delete-Token-Hash': deleteTokenHash,
+      'X-Shard-Delete-Key': shardDeleteKey,
       'X-Upload-Ticket': ticket,
     },
     body: encrypted,
@@ -153,6 +154,8 @@ export async function cancelTransfer(
     manifest_hash: info.manifestHash,
     ack_secret: info.ackSecret,
     delete_token: info.deleteToken,
+    // This page only cancels what it just uploaded, always with per-shard tokens.
+    shard_delete_tokens: true,
     shards: info.shards,
   })
   return resp.json()

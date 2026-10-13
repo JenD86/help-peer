@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import { deriveKeys, relayHash, encryptSegment, generateCode, fileHasher, newSecret, secretHash } from '../lib/crypto'
+import { deriveKeys, relayHash, encryptSegment, generateCode, fileHasher, newSecret, secretHash, shardDeleteKey } from '../lib/crypto'
 import {
   beginUpload, finishUpload, uploadSegment, uploadManifest, notifyRecipients, checkAuth, cancelTransfer, searchUsers, lookupUser,
   type ShardInfo, type CancelInfo,
@@ -169,7 +169,7 @@ export default function Upload() {
       const rHash = relayHash(kIndex)
       const ackSecret = newSecret()
       const deleteToken = newSecret()
-      const deleteTokenHash = secretHash(deleteToken)
+      const shardKey = shardDeleteKey(deleteToken)
 
       // Ask to upload this much before sending anything, so a transfer that
       // is not allowed is refused now and not part way through.
@@ -197,7 +197,7 @@ export default function Upload() {
 
           setStatus('uploading')
           setProgress(`Uploading ${file.name} (${pct}% overall)...`)
-          const uploaded = await uploadSegment(encrypted, deleteTokenHash, ticket)
+          const uploaded = await uploadSegment(encrypted, shardKey, ticket)
           segments.push({
             id: `seg_${String(i).padStart(6, '0')}`,
             original_size: plaintext.byteLength,
@@ -224,6 +224,7 @@ export default function Upload() {
         ...(note ? { message: note } : {}),
         ack_secret: ackSecret,
         delete_token: deleteToken,
+        shard_delete_tokens: true,
         total_bytes: totalBytes,
         segment_size: SEGMENT_SIZE,
         erasure_data_shards: 8,

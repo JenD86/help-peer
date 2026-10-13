@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,9 +85,21 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusBadRequest, "segment too small")
 		return
 	}
-	deleteTokenHash := req.Header.Get("X-Delete-Token-Hash")
-	if !isHexHash(deleteTokenHash) {
-		writeError(w, http.StatusBadRequest, "X-Delete-Token-Hash required")
+	// Each shard is stored with the hash of its own delete token, derived
+	// from X-Shard-Delete-Key. X-Delete-Token-Hash (one hash for every shard)
+	// is still accepted from pages loaded before per-shard tokens.
+	tokenHashFor := func(string) string { return "" }
+	if key := req.Header.Get("X-Shard-Delete-Key"); key != "" {
+		if !isHexHash(key) {
+			writeError(w, http.StatusBadRequest, "invalid X-Shard-Delete-Key")
+			return
+		}
+		k, _ := hex.DecodeString(key)
+		tokenHashFor = func(shardHash string) string { return shardTokenHash(k, shardHash) }
+	} else if legacy := req.Header.Get("X-Delete-Token-Hash"); isHexHash(legacy) {
+		tokenHashFor = func(string) string { return legacy }
+	} else {
+		writeError(w, http.StatusBadRequest, "X-Shard-Delete-Key required")
 		return
 	}
 
@@ -119,7 +132,7 @@ func (s *Server) segmentUploadHandler(w http.ResponseWriter, req *http.Request) 
 		wg.Add(1)
 		go func(i int, hash string, shard []byte) {
 			defer wg.Done()
-			node, err := s.uploadShard(place, hash, shard, deleteTokenHash)
+			node, err := s.uploadShard(place, hash, shard, tokenHashFor(hash))
 			infos[i] = ShardInfo{Index: i, Hash: hash, Node: node.Public}
 			errs[i] = err
 		}(i, hash, shard)

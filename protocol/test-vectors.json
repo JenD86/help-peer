@@ -53,5 +53,23 @@
       "4a9888d582393490ba4403d76fb434a1b58c1d0313d5959d7cdb0dcc5bbecc18",
       "1e9b4afdce2c8f7b2070e6401a0d044ed88112087006692cd346f66ec86f9b8d"
     ]
+  },
+  "shard_delete_tokens": {
+    "description": "Per-shard delete tokens (SPEC 2.3). shard_delete_key = BLAKE3 derive_key(context, delete_token); shard_token = BLAKE3 keyed(shard_delete_key, shard hash bytes); nodes store BLAKE3(shard_token).",
+    "context": "help-peer 2026-10-13 shard delete key",
+    "delete_token": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "shard_delete_key": "f42d55859f94337b7b2b45971f6898855f5fbd24d6fd650be4a3c5657ee9398d",
+    "shards": [
+      {
+        "shard_hash": "a747d92f814a9bc417b5c7168ac0b734590887f24e4406e6de47030c4a7b7f11",
+        "shard_token": "1e0fa0ab331e06f6ca29a2cd8e9c1fd436e7a5281935946bfe152d65012626e6",
+        "shard_token_hash": "3972f1467f2b7be6c3ec1bae935542fcb2ac0d869c5bebf82371e3a91f1139af"
+      },
+      {
+        "shard_hash": "ee19689d0a2ade57464c4a7af3aaffd8e43934294a2e7a709de9ea8e6c441aa4",
+        "shard_token": "752efe47006a3524bb00e44023d3c3537ac3e910f1ab9247eb9ca8600e8442a8",
+        "shard_token_hash": "7bf6ca166a404e8520bc27bc593cebfaef4b868503f93f1d1e71470a75229b8f"
+      }
+    ]
   }
 }
