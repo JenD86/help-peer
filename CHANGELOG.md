@@ -2,7 +2,9 @@
 
 Notable changes to Help Peer. Entries marked **Action required** need storage node operators or users to update.
 
-## Unreleased
+## 2026-10-13 — Python SDK 0.2.2, CLI and web
+
+To update: `pip install --upgrade "helppeer>=0.2.2"` for the Python SDK, or `git pull && cargo install --path client` for the Rust CLI. The web changes are live on help-peer.org; self-hosters update by pulling and rebuilding.
 
 ### CLI and Python SDK: less trust in the logged-in website
 
