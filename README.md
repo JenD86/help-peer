@@ -363,7 +363,8 @@ The CLI and SDK spread shards round-robin over the list from `/api/config`, so t
 - **Delete tokens**: Shards can only be deleted early with a token from the encrypted manifest (used by `helppeer cancel`); otherwise they expire by TTL
 - **Rate limiting**: The relay and web backend throttle clients that make repeated failed manifest lookups (code guessing) and limit manifest uploads per client; the relay also caps its total storage. The web backend limits login and notification emails. Limits are saved to `ratelimits.json` in each service's data directory (every 10 seconds and on shutdown), so restarting doesn't reset them
 - **TTL expiry**: Shards and manifests auto-expire after 24 hours, including across restarts
-- **Web trust model**: The web backend serves the page that does the encryption, so web users trust the server operator not to tamper with it. The server never stores transfer codes
+- **Web trust model**: The web backend serves the page that does the encryption, so web users trust the server operator not to tamper with it
+- **Who sees the code**: The code is generated on the sender's machine and only reaches the web server when you ask it to deliver the code to recipients. Sending to a username (from the web or with `--to`) stores the code in the recipient's inbox until the transfer is received or expires; sending to an email address passes the code through the server and into the email. In both cases the server operator, and for email the mail providers, could decrypt that transfer. Codes you share yourself never reach the server. See the [privacy note](#usernames-directory-and-inbox)
 
 ## Configuration
 
