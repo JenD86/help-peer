@@ -80,6 +80,10 @@ class Manifest:
     # Hex token that authorizes deleting this transfer's shards from storage
     # nodes (they only store its BLAKE3).
     delete_token: str = ""
+    # True when each shard was uploaded with its own token derived from
+    # delete_token (SPEC 4.4); False in older senders' manifests, whose shards
+    # all use delete_token itself.
+    shard_delete_tokens: bool = False
     # Optional note from the sender describing the transfer.
     message: Optional[str] = None
     total_bytes: int = 0
@@ -124,6 +128,8 @@ class Manifest:
         }
         if self.message is not None:
             out["message"] = self.message
+        if self.shard_delete_tokens:
+            out["shard_delete_tokens"] = True
         return json.dumps(out).encode("utf-8")
 
     @classmethod
@@ -134,6 +140,7 @@ class Manifest:
             transfer_name=d["transfer_name"],
             ack_secret=d.get("ack_secret", ""),
             delete_token=d.get("delete_token", ""),
+            shard_delete_tokens=d.get("shard_delete_tokens") is True,
             message=d.get("message"),
             total_bytes=d["total_bytes"],
             segment_size=d["segment_size"],

@@ -67,7 +67,7 @@ pub async fn cancel_transfer(code: &str, relay_url: &str, configured_nodes: &[St
         };
         let limit = limit.clone();
         let url = format!("{}/shard/{}", shard.node.trim_end_matches('/'), shard.hash);
-        let token = manifest.delete_token.clone();
+        let token = shard_delete_token(&manifest, &shard.hash);
         tasks.spawn(async move {
             let _permit = limit.acquire_owned().await;
             delete_shard(&client, &url, &token).await
@@ -82,6 +82,16 @@ pub async fn cancel_transfer(code: &str, relay_url: &str, configured_nodes: &[St
         }
     }
     Ok(result)
+}
+
+/// The token that deletes this shard: derived per shard for manifests that
+/// say so (SPEC 4.4), else the transfer's shared delete token.
+fn shard_delete_token(manifest: &Manifest, shard_hash: &str) -> String {
+    if manifest.shard_delete_tokens {
+        crypto::shard_token(&crypto::shard_delete_key(&manifest.delete_token), shard_hash)
+    } else {
+        manifest.delete_token.clone()
+    }
 }
 
 /// DELETE a shard, retrying network errors and server errors (deleting is
@@ -99,4 +109,38 @@ async fn delete_shard(client: &Client, url: &str, token: &str) -> Result<StatusC
         }
     }
     Err(last_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(shard_delete_tokens: bool) -> Manifest {
+        let json = format!(
+            r#"{{"version":2,"transfer_name":"t","ack_secret":"{a}","delete_token":"{d}",{flag}
+                "total_bytes":0,"segment_size":64,"erasure_data_shards":8,"erasure_parity_shards":4,"files":[]}}"#,
+            a = "cd".repeat(32),
+            d = "ef".repeat(32),
+            flag = if shard_delete_tokens { r#""shard_delete_tokens":true,"# } else { "" },
+        );
+        Manifest::from_json(json.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn test_old_manifests_use_the_shared_token() {
+        let m = manifest(false);
+        assert!(!m.shard_delete_tokens);
+        assert_eq!(shard_delete_token(&m, &"ab".repeat(32)), m.delete_token);
+        // ...and it isn't written back into old-style manifests.
+        assert!(!String::from_utf8(m.to_json().unwrap()).unwrap().contains("shard_delete_tokens"));
+    }
+
+    #[test]
+    fn test_new_manifests_use_per_shard_tokens() {
+        let m = manifest(true);
+        let (a, b) = (shard_delete_token(&m, &"ab".repeat(32)), shard_delete_token(&m, &"cd".repeat(32)));
+        assert_ne!(a, b);
+        assert_ne!(a, m.delete_token);
+        assert_eq!(a, crypto::shard_token(&crypto::shard_delete_key(&m.delete_token), &"ab".repeat(32)));
+    }
 }

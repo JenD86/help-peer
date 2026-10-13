@@ -2,11 +2,16 @@
 
 Notable changes to Help Peer. Entries marked **Action required** need storage node operators or users to update.
 
-## Unreleased
+## 2026-10-13 — Python SDK 0.3.0 and CLI
 
-### Per-shard delete tokens (web)
+To update: `pip install --upgrade "helppeer>=0.3.0"` for the Python SDK, or `git pull && cargo install --path client` for the Rust CLI. The web and relay changes below are live on help-peer.org.
 
-Every shard of a transfer used to be stored with the same delete-token hash, so storage nodes, or anyone comparing several nodes' data, could tell which shards belonged to the same transfer. Web uploads now give each shard its own token, derived from the transfer's delete token and the shard's hash (SPEC 4.4), and mark the manifest with `shard_delete_tokens`. Storage nodes need no update, and every client can still receive these transfers. The CLI and Python SDK follow in the next release; until then, they can't cancel new web transfers early (the transfer is still withdrawn at once, and its shards expire within 24 hours).
+### Per-shard delete tokens
+
+Every shard of a transfer used to be stored with the same delete-token hash, so storage nodes, or anyone comparing several nodes' data, could tell which shards belonged to the same transfer. Uploads from the web app, the CLI and the SDK now give each shard its own token, derived from the transfer's delete token and the shard's hash (SPEC 4.4), and mark the manifest with `shard_delete_tokens`.
+
+- **Storage nodes need no update**, and every client version can still receive every transfer.
+- **New clients cancel old and new transfers.** Older clients (SDK 0.2.x and earlier CLI builds) can't delete a new transfer's shards early: `cancel` still withdraws it from the relay at once, and its shards expire within 24 hours.
 
 ### Relay: per-client rate limits behind a reverse proxy
 

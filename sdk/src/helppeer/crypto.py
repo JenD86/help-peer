@@ -92,3 +92,20 @@ def content_hash(data: bytes) -> str:
     """Compute BLAKE3 hash of data, return hex string."""
     import blake3
     return blake3.blake3(data).hexdigest()
+
+
+# Context for deriving per-shard delete tokens (protocol/SPEC.md 4.4).
+SHARD_DELETE_KEY_CONTEXT = "help-peer 2026-10-13 shard delete key"
+
+
+def shard_delete_key(delete_token_hex: str) -> bytes:
+    """Per-transfer key that each shard's delete token is derived from, so
+    storage nodes store a different token hash for every shard."""
+    import blake3
+    return blake3.blake3(bytes.fromhex(delete_token_hex), derive_key_context=SHARD_DELETE_KEY_CONTEXT).digest()
+
+
+def shard_token(key: bytes, shard_hash_hex: str) -> str:
+    """The delete token (hex) for the shard with this hex hash."""
+    import blake3
+    return blake3.blake3(bytes.fromhex(shard_hash_hex), key=key).hexdigest()

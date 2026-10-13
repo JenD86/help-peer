@@ -88,8 +88,11 @@ def send(
     manifest.erasure_parity_shards = config.parity_shards
     manifest.ack_secret = crypto.new_secret()
     manifest.delete_token = crypto.new_secret()
+    # Each shard gets its own delete token, so nodes can't group a transfer's
+    # shards by the token hash they store (SPEC 4.4).
+    manifest.shard_delete_tokens = True
     manifest.message = message
-    uploader = _ShardUploader(storage_nodes, crypto.secret_hash(manifest.delete_token))
+    uploader = _ShardUploader(storage_nodes, crypto.shard_delete_key(manifest.delete_token))
 
     with _session() as session, ThreadPoolExecutor(max_workers=total_shards) as pool:
         for f in manifest.files:
@@ -337,7 +340,7 @@ def cancel(code: str) -> Dict[str, Any]:
         def delete_shard(shard: ManifestShard) -> str:
             try:
                 r = node_sessions.for_node(shard.node).delete(
-                    _shard_url(shard), headers={"X-Delete-Token": manifest.delete_token},
+                    _shard_url(shard), headers={"X-Delete-Token": _shard_delete_token(manifest, shard.hash)},
                     timeout=TIMEOUT, allow_redirects=False,
                 )
             except (requests.RequestException, ValueError):
@@ -354,6 +357,14 @@ def cancel(code: str) -> Dict[str, Any]:
         "shards_already_gone": outcomes.count("already_gone"),
         "shards_failed": outcomes.count("failed"),
     }
+
+
+def _shard_delete_token(manifest: Manifest, shard_hash: str) -> str:
+    """The token that deletes this shard: derived per shard for manifests that
+    say so (SPEC 4.4), else the transfer's shared delete token."""
+    if manifest.shard_delete_tokens:
+        return crypto.shard_token(crypto.shard_delete_key(manifest.delete_token), shard_hash)
+    return manifest.delete_token
 
 
 def _clear_from_inbox(api, r_hash: str) -> None:
@@ -431,14 +442,15 @@ class _ShardUploader:
     """Uploads shards round-robin, moving a failed node's shards to the next
     healthy node for the rest of the transfer."""
 
-    def __init__(self, nodes: List[str], delete_token_hash: str):
+    def __init__(self, nodes: List[str], shard_delete_key: bytes):
         self.nodes = nodes
-        self.delete_token_hash = delete_token_hash
+        self.shard_delete_key = shard_delete_key
         self.dead: set = set()
         self._lock = threading.Lock()
 
     def upload(self, session: requests.Session, index: int, data: bytes) -> ManifestShard:
         h = crypto.content_hash(data)
+        token_hash = crypto.secret_hash(crypto.shard_token(self.shard_delete_key, h))
         last_err: Exception = RuntimeError("all storage nodes have failed")
         for offset in range(len(self.nodes)):
             i = (index + offset) % len(self.nodes)
@@ -451,7 +463,7 @@ class _ShardUploader:
                     f"{node}/shard/{h}", data=data, timeout=TIMEOUT,
                     headers={
                         "Content-Type": "application/octet-stream",
-                        "X-Delete-Token-Hash": self.delete_token_hash,
+                        "X-Delete-Token-Hash": token_hash,
                     },
                 )
                 if resp.status_code in (200, 201):

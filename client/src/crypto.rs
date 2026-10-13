@@ -114,6 +114,22 @@ pub fn content_hash(data: &[u8]) -> String {
     hex::encode(blake3::hash(data).as_bytes())
 }
 
+/// Context for deriving per-shard delete tokens (protocol/SPEC.md 4.4).
+const SHARD_DELETE_KEY_CONTEXT: &str = "help-peer 2026-10-13 shard delete key";
+
+/// Per-transfer key that each shard's delete token is derived from, so
+/// storage nodes store a different token hash for every shard.
+pub fn shard_delete_key(delete_token_hex: &str) -> [u8; 32] {
+    let token = hex::decode(delete_token_hex).expect("delete token is hex");
+    blake3::derive_key(SHARD_DELETE_KEY_CONTEXT, &token)
+}
+
+/// The delete token (hex) for the shard with this hex hash.
+pub fn shard_token(key: &[u8; 32], shard_hash_hex: &str) -> String {
+    let hash = hex::decode(shard_hash_hex).expect("shard hash is hex");
+    hex::encode(blake3::keyed_hash(key, &hash).as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +185,15 @@ mod tests {
 
         let sh = &v["secret_hash"];
         assert_eq!(secret_hash(sh["secret"].as_str().unwrap()), sh["blake3"].as_str().unwrap());
+
+        let st = &v["shard_delete_tokens"];
+        assert_eq!(st["context"].as_str().unwrap(), SHARD_DELETE_KEY_CONTEXT);
+        let key = shard_delete_key(st["delete_token"].as_str().unwrap());
+        assert_eq!(hex::encode(key), st["shard_delete_key"].as_str().unwrap());
+        for s in st["shards"].as_array().unwrap() {
+            let token = shard_token(&key, s["shard_hash"].as_str().unwrap());
+            assert_eq!(token, s["shard_token"].as_str().unwrap());
+            assert_eq!(secret_hash(&token), s["shard_token_hash"].as_str().unwrap());
+        }
     }
 }

@@ -40,6 +40,11 @@ pub struct Manifest {
     /// Hex token that authorizes deleting this transfer's shards from
     /// storage nodes (they only store its BLAKE3).
     pub delete_token: String,
+    /// True when each shard was uploaded with its own token derived from
+    /// `delete_token` (SPEC 4.4); absent (false) in older senders' manifests,
+    /// whose shards all use `delete_token` itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shard_delete_tokens: bool,
     /// Optional note from the sender describing the transfer. Optional so
     /// manifests from older senders still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +127,7 @@ impl Manifest {
             transfer_name: transfer_name.to_string(),
             ack_secret: String::new(),  // filled during upload
             delete_token: String::new(), // filled during upload
+            shard_delete_tokens: true,
             message: None,
             total_bytes: files.iter().map(|f| f.size).sum(),
             segment_size: crypto::SEGMENT_SIZE as u32,
@@ -423,6 +429,7 @@ mod tests {
             transfer_name: "t".into(),
             ack_secret: "cd".repeat(32),
             delete_token: "ef".repeat(32),
+            shard_delete_tokens: false,
             message: None,
             total_bytes: 100,
             segment_size: 64,
@@ -523,6 +530,7 @@ mod tests {
             transfer_name: "test".into(),
             ack_secret: "cd".repeat(32),
             delete_token: "ef".repeat(32),
+            shard_delete_tokens: false,
             message: None,
             total_bytes: 100,
             segment_size: 67108864,

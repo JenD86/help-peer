@@ -4,6 +4,6 @@ from .client import send, receive, info, cancel
 from .config import configure, Config
 from .account import login, logout, inbox
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 __all__ = ["send", "receive", "info", "cancel", "login", "logout", "inbox", "configure", "Config", "__version__"]

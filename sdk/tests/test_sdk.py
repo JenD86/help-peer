@@ -372,6 +372,16 @@ class TestSharedVectors:
         sh = self.v["secret_hash"]
         assert crypto.secret_hash(sh["secret"]) == sh["blake3"]
 
+    def test_shard_delete_tokens(self):
+        st = self.v["shard_delete_tokens"]
+        assert st["context"] == crypto.SHARD_DELETE_KEY_CONTEXT
+        key = crypto.shard_delete_key(st["delete_token"])
+        assert key.hex() == st["shard_delete_key"]
+        for s in st["shards"]:
+            token = crypto.shard_token(key, s["shard_hash"])
+            assert token == s["shard_token"]
+            assert crypto.secret_hash(token) == s["shard_token_hash"]
+
     def test_erasure(self):
         e = self.v["erasure"]
         data = bytes.fromhex(e["data"])
@@ -560,3 +570,21 @@ class TestLoggedInSideEffects:
         assert config.trusted_nodes() == config.DEFAULT_NODES  # ...but not trusted
         monkeypatch.setattr(config, "_default_config", config.Config(storage_nodes=["http://10.0.0.5:7001"]))
         assert config.trusted_nodes() == ["http://10.0.0.5:7001"]
+
+
+
+class TestShardDeleteTokens:
+    def test_old_manifests_use_the_shared_token(self):
+        m = _valid_manifest()
+        m2 = manifest.Manifest.from_json(m.to_json())
+        assert m2.shard_delete_tokens is False and b"shard_delete_tokens" not in m.to_json()
+        assert client._shard_delete_token(m2, "ab" * 32) == m2.delete_token
+
+    def test_new_manifests_use_per_shard_tokens(self):
+        m = _valid_manifest()
+        m.shard_delete_tokens = True
+        m2 = manifest.Manifest.from_json(m.to_json())
+        assert m2.shard_delete_tokens is True
+        a, b = client._shard_delete_token(m2, "ab" * 32), client._shard_delete_token(m2, "cd" * 32)
+        assert a != b and a != m2.delete_token
+        assert a == crypto.shard_token(crypto.shard_delete_key(m2.delete_token), "ab" * 32)

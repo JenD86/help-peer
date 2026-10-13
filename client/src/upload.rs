@@ -52,7 +52,9 @@ pub async fn upload_path(
     manifest.message = config.message.clone().filter(|m| !m.trim().is_empty());
     manifest.ack_secret = crypto::new_secret();
     manifest.delete_token = crypto::new_secret();
-    let delete_token_hash = crypto::secret_hash(&manifest.delete_token);
+    // Each shard gets its own delete token, so nodes can't group a transfer's
+    // shards by the token hash they store (SPEC 4.4).
+    let shard_delete_key = crypto::shard_delete_key(&manifest.delete_token);
 
     // Nodes that failed during this transfer; their shards go to the others.
     let nodes = Arc::new(config.storage_nodes.clone());
@@ -83,9 +85,9 @@ pub async fn upload_path(
                 let client = client.clone();
                 let nodes = nodes.clone();
                 let dead_nodes = dead_nodes.clone();
-                let delete_token_hash = delete_token_hash.clone();
                 tasks.spawn(async move {
                     let hash = crypto::content_hash(&shard);
+                    let delete_token_hash = crypto::secret_hash(&crypto::shard_token(&shard_delete_key, &hash));
                     let node = upload_shard_with_failover(
                         &client, &nodes, &dead_nodes, shard_idx, &hash, &shard, &delete_token_hash,
                     )
