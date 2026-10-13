@@ -16,7 +16,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .account import current_api, is_email
-from .config import get_config, resolve_servers
+from .config import get_config, resolve_servers, trusted_nodes
 from . import crypto
 from . import erasure
 from .nodes import NodeSessions, NoRetryOnPrivateAddress, PublicOnlyAdapter
@@ -174,7 +174,8 @@ def receive(
         ({path: blake3}), file_list ([{path, size, blake3}]), acknowledged
         and resumed_segments.
     """
-    relay_url, nodes = resolve_servers()
+    relay_url, _ = resolve_servers()
+    nodes = trusted_nodes()
     k_data, k_index = crypto.derive_keys(code)
     r_hash = crypto.relay_hash(k_index)
 
@@ -268,10 +269,7 @@ def receive(
     # If it was sent to our username, clear it from the inbox.
     api = current_api()
     if api is not None:
-        try:
-            api.mark_received(r_hash)
-        except Exception:
-            pass
+        _clear_from_inbox(api, r_hash)
 
     return {
         "transfer_name": manifest.transfer_name,
@@ -318,7 +316,8 @@ def cancel(code: str) -> Dict[str, Any]:
     Returns:
         Dict with transfer_name, shards_deleted, shards_already_gone, shards_failed.
     """
-    relay_url, nodes = resolve_servers()
+    relay_url, _ = resolve_servers()
+    nodes = trusted_nodes()
     k_data, k_index = crypto.derive_keys(code)
     r_hash = crypto.relay_hash(k_index)
     manifest_url = f"{relay_url}/manifest/{r_hash}"
@@ -355,6 +354,16 @@ def cancel(code: str) -> Dict[str, Any]:
         "shards_already_gone": outcomes.count("already_gone"),
         "shards_failed": outcomes.count("failed"),
     }
+
+
+def _clear_from_inbox(api, r_hash: str) -> None:
+    """Tell the site a transfer in our inbox was received, but only if it is
+    in the inbox: transfers the site never handled aren't reported to it."""
+    try:
+        if any(item.get("manifest_hash") == r_hash for item in api.inbox()):
+            api.mark_received(r_hash)
+    except Exception:
+        pass  # best effort; the item expires on its own
 
 
 def _session(adapter_cls=HTTPAdapter, retry_cls=Retry) -> requests.Session:

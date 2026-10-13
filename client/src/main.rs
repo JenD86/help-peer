@@ -168,6 +168,26 @@ async fn resolve_servers(cli: &Cli, api: Option<&account::Api>) -> (String, Vec<
     )
 }
 
+/// Storage nodes the user chose themselves (flags or environment), else the
+/// local default. Only these may be on private addresses when receiving:
+/// nodes from a logged-in website's settings are used, but held to the same
+/// public-address rule as a manifest's, so a site can't point the client at
+/// the user's own network.
+fn trusted_nodes(cli: &Cli) -> Vec<String> {
+    let nodes = cli.nodes.clone().or_else(|| std::env::var("HELPEER_STORAGE_NODES").ok());
+    split_list(&nodes.unwrap_or_else(|| DEFAULT_NODES.to_string()))
+}
+
+/// After a receive, clear the transfer from our inbox on the site, but only
+/// if it's there: transfers the site never handled aren't reported to it.
+async fn clear_from_inbox(api: &account::Api, relay_hash: &str) {
+    if let Ok(items) = api.inbox().await {
+        if items.iter().any(|i| i["manifest_hash"].as_str() == Some(relay_hash)) {
+            let _ = api.mark_received(relay_hash).await;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -279,7 +299,8 @@ async fn main() {
         }
 
         Commands::Receive { code, output } => {
-            let (relay, nodes) = resolve_servers(&cli, api.as_ref()).await;
+            let (relay, _) = resolve_servers(&cli, api.as_ref()).await;
+            let nodes = trusted_nodes(&cli);
             out.say(&format!("Help Peer — Receiving into: {}", output.display()));
             out.say(&format!("Relay: {}", relay));
             out.say("");
@@ -290,7 +311,7 @@ async fn main() {
             };
             // If it was sent to our username, clear it from the inbox.
             if let Some(api) = &api {
-                let _ = api.mark_received(&result.relay_hash).await;
+                clear_from_inbox(api, &result.relay_hash).await;
             }
 
             let manifest = &result.manifest;
@@ -355,8 +376,8 @@ async fn main() {
         }
 
         Commands::Cancel { code } => {
-            let (relay, nodes) = resolve_servers(&cli, api.as_ref()).await;
-            let r = match cancel::cancel_transfer(code, &relay, &nodes).await {
+            let (relay, _) = resolve_servers(&cli, api.as_ref()).await;
+            let r = match cancel::cancel_transfer(code, &relay, &trusted_nodes(&cli)).await {
                 Ok(r) => r,
                 Err(e) => out.fail("Cancel", e),
             };
@@ -449,5 +470,19 @@ async fn main() {
                 println!("{}", if removed { "✓ Logged out" } else { "Not logged in" });
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trusted_nodes_are_only_the_users_own() {
+        std::env::remove_var("HELPEER_STORAGE_NODES");
+        let cli = Cli::parse_from(["helppeer", "receive", "code"]);
+        assert_eq!(trusted_nodes(&cli), vec![DEFAULT_NODES.to_string()]);
+        let cli = Cli::parse_from(["helppeer", "--nodes", "http://10.0.0.5:7001, http://10.0.0.6:7001", "receive", "code"]);
+        assert_eq!(trusted_nodes(&cli), vec!["http://10.0.0.5:7001".to_string(), "http://10.0.0.6:7001".to_string()]);
     }
 }

@@ -54,6 +54,15 @@ def resolve_servers() -> Tuple[str, List[str]]:
     return (relay or DEFAULT_RELAY).rstrip("/"), nodes or list(DEFAULT_NODES)
 
 
+def trusted_nodes() -> List[str]:
+    """Storage nodes the user chose (configure() or HELPEER_STORAGE_NODES),
+    else the local default. Only these may be on private addresses when
+    receiving: a logged-in website's nodes are used, but held to the same
+    public-address rule as a manifest's, so a site can't point the client at
+    the user's own network."""
+    return _default_config.storage_nodes or list(DEFAULT_NODES)
+
+
 def configure(
     relay: str = None,
     storage_nodes: List[str] = None,

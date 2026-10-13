@@ -4,6 +4,12 @@ Notable changes to Help Peer. Entries marked **Action required** need storage no
 
 ## Unreleased
 
+### CLI and Python SDK: less trust in the logged-in website
+
+- After `receive`, the client only tells the website about the transfer if it's in your inbox there. Previously every receive by a logged-in client reported the transfer's relay key, including transfers the site never handled.
+- Storage nodes from the website's settings are no longer trusted with private addresses when receiving. Only nodes you set yourself (`--nodes`, `HELPEER_STORAGE_NODES`, `configure()`) and the local default are; a site's own nodes are public, so nothing changes for normal use.
+- The README's "Behaviour to rely on" now lists what logging in changes.
+
 ### Web: less metadata kept and shown
 
 - **Sending to recipients now needs a username.** Recipients see `@username`; a sender's email address is no longer shown to them, and the inbox API no longer includes it (it previously did even for senders with a username). The web app, CLI and SDK check for a username before uploading.

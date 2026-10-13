@@ -72,6 +72,7 @@ helppeer --json inbox                                            # transfers sen
 - **`cancel` is final**, and **transfers expire 24 hours after sending.**
 - **Recipients:** `--to` takes usernames (`alice` or `@alice`, delivered to their inbox on the site) and email addresses (sent the code by email), and needs `helppeer login`. Unknown usernames fail before anything is uploaded.
 - **Storage:** a transfer takes 1.5× its size across storage nodes (erasure coding), for up to 24 hours.
+- **What logging in changes.** Unless you set `--relay`/`--nodes` or `HELPEER_RELAY_URL`/`HELPEER_STORAGE_NODES`, every command uses the relay and storage nodes the website's `/api/config` names, so the site chooses your servers; set them explicitly to pin them. When receiving, the site's nodes are only contacted at public addresses. After a `receive`, the client checks your inbox and, if the transfer is in it, tells the site so it's cleared; transfers the site never handled aren't reported.
 
 **Python SDK** — the same operations as functions; failures raise exceptions:
 
@@ -360,7 +361,7 @@ The CLI and SDK spread shards round-robin over the list from `/api/config`, so t
 - **Integrity checks**: Storage nodes refuse shards whose content doesn't match their BLAKE3 name; receivers discard shards that fail their hash and rebuild from parity, then check every file against the sender's BLAKE3 hash
 - **Erasure coding**: 8 data + 4 parity shards — any 8 of 12 rebuild a segment (see [Multiple Storage Nodes](#multiple-storage-nodes) for what that means per node)
 - **Manifest validation**: Receivers check the manifest's sizes, indexes and paths before allocating or writing anything
-- **Storage node addresses**: The manifest names the storage nodes to fetch from, so the CLI and SDK only contact a node if it's one you configured (`--nodes`, `HELPEER_STORAGE_NODES` or your login) or it resolves to a public address, checked when connecting. A sender can't make your client request `localhost`, your router or a cloud metadata service. Shard requests don't follow redirects or bypass the check through a proxy, and responses larger than the manifest says are cut off
+- **Storage node addresses**: The manifest names the storage nodes to fetch from, so the CLI and SDK only contact a node if it's one you configured yourself (`--nodes` or `HELPEER_STORAGE_NODES`) or it resolves to a public address, checked when connecting. A sender can't make your client request `localhost`, your router or a cloud metadata service. Shard requests don't follow redirects or bypass the check through a proxy, and responses larger than the manifest says are cut off
 - **Safetensors validation**: The header of each `.safetensors` file is validated when its first segment arrives
 - **Confirmed retrieval**: The relay deletes a manifest once the receiver confirms a verified download, using a secret from inside the encrypted manifest (or once each recipient has, for multi-recipient transfers via `X-Max-Retrievals`). Until then, failed downloads can be retried with the same code
 - **Delete tokens**: Shards can only be deleted early with a token from the encrypted manifest (used by `helppeer cancel`); otherwise they expire by TTL

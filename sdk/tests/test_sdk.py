@@ -528,3 +528,35 @@ class TestSendToRecipients:
         (tmp_path / "f.bin").write_bytes(b"x")
         with pytest.raises(RuntimeError, match="username"):
             client.send(str(tmp_path / "f.bin"), to=["bob"])
+
+
+
+class TestLoggedInSideEffects:
+    def test_receipt_only_for_inbox_items(self):
+        class Api:
+            marked = []
+
+            def inbox(self):
+                return [{"manifest_hash": "in-inbox"}]
+
+            def mark_received(self, h):
+                self.marked.append(h)
+
+        api = Api()
+        client._clear_from_inbox(api, "not-from-this-site")
+        client._clear_from_inbox(api, "in-inbox")
+        assert api.marked == ["in-inbox"]
+
+    def test_website_nodes_are_not_trusted(self, monkeypatch):
+        from helppeer import config
+
+        class Api:
+            def server_config(self):
+                return {"relay_url": "https://relay.site", "storage_nodes": ["http://169.254.169.254"]}
+
+        monkeypatch.setattr(config, "_default_config", config.Config(relay_url=None, storage_nodes=None))
+        monkeypatch.setattr("helppeer.account.current_api", lambda: Api())
+        assert config.resolve_servers()[1] == ["http://169.254.169.254"]  # still used...
+        assert config.trusted_nodes() == config.DEFAULT_NODES  # ...but not trusted
+        monkeypatch.setattr(config, "_default_config", config.Config(storage_nodes=["http://10.0.0.5:7001"]))
+        assert config.trusted_nodes() == ["http://10.0.0.5:7001"]
