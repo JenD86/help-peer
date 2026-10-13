@@ -67,7 +67,7 @@ export default function Landing() {
           Every command is non-interactive and supports <code>--json</code>: one JSON object on stdout, exit code 0 on
           success. Interrupted downloads resume when you run <code>receive</code> again with the same code.
         </p>
-        <Code>{`pip install "git+https://github.com/JenD86/help-peer#subdirectory=sdk"
+        <Code>{`pip install helppeer
 helppeer login --server ${typeof window !== 'undefined' ? window.location.origin : 'https://this-site'} --token <API token>
 
 helppeer --json send ./model-dir --name "my-finetune"     # → {"status": "ok", "code": "...", ...}
