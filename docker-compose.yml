@@ -15,6 +15,7 @@ services:
       # Shared with the web backend so its requests skip per-IP limits (it
       # limits its own users instead). Empty disables it.
       - RELAY_TRUSTED_TOKEN=${RELAY_TRUSTED_TOKEN:-}
+      - RELAY_TRUST_PROXY=${RELAY_TRUST_PROXY:-}
     volumes:
       - ${DATA_DIR:-./data}/relay-data:/data
 
