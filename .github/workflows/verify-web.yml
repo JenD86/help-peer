@@ -1,0 +1,30 @@
+name: Verify web app
+
+# Checks that help-peer.org serves what its deployed commit builds to, every
+# hour and after each deploy. The run history is the public record.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_run:
+    workflows: [Deploy]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-web
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check help-peer.org against its commit
+        run: scripts/verify-web.sh https://help-peer.org

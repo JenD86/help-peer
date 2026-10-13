@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: docker
+    directories: ["/relay", "/storage-node", "/web"]
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
