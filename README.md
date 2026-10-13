@@ -195,7 +195,7 @@ The relay, storage node and web backend all speak plain HTTP and expect a TLS-te
    ```
 
    nginx, or NGINX Proxy Manager, works the same way; raise `client_max_body_size` to at least `100m`, since web uploads send 64 MB segments, and enable HSTS on the web host.
-2. **Keep the services off the public internet**: publish their ports on `127.0.0.1` only (e.g. `127.0.0.1:8080:8080` in `docker-compose.yml`), or firewall them, so nobody can bypass the proxy over plain HTTP.
+2. **Keep the services off the public internet**, so nobody can bypass the proxy over plain HTTP. `docker-compose.yml` publishes their ports on `127.0.0.1` only, which suits a proxy running directly on the host, like the Caddy example. **If the proxy runs in Docker itself, as NGINX Proxy Manager does, it can't reach those ports**: `127.0.0.1` inside its container is the container, not the host, and every request gets a 502. Instead, attach the proxy's container to the `proxy` network the compose file creates (`docker network connect proxy <proxy container>`) and point it at `help-peer-web:8080`, `help-peer-relay:7000` and `help-peer-node:7001`. Don't rely on a host firewall such as ufw for this: Docker's published ports bypass it.
 3. **Tell the services their public URLs** in `.env`: `WEB_BASE_URL=https://help.example.com`, `RELAY_URL_PUBLIC=https://relay.example.com` and `STORAGE_NODES_PUBLIC=https://node.example.com`, so login links, manifests and `/api/config` use HTTPS. Set `WEB_TRUST_PROXY=1` and `RELAY_TRUST_PROXY=1` so the web backend and relay rate-limit real client addresses rather than the proxy's (only once step 2 is done).
 
 ### Transfer Files

@@ -2,6 +2,13 @@
 
 Notable changes to Help Peer. Entries marked **Action required** need storage node operators or users to update.
 
+## Unreleased
+
+### Deployment
+
+- `docker-compose.yml` publishes the relay, storage node and web ports on `127.0.0.1` only, and adds a `proxy` network (aliases `help-peer-web`, `help-peer-relay`, `help-peer-node`) for a reverse proxy running in Docker. If yours connected to the host's ports from another container, attach it to that network and point it at the aliases, or it will get 502s.
+- README: the Public Deployment guide covers proxies running in Docker, such as NGINX Proxy Manager.
+
 ## 2026-10-13 — Python SDK 0.3.1
 
 To update: `pip install --upgrade "helppeer>=0.3.1"`.
