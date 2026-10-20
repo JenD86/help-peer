@@ -1,5 +1,6 @@
 services:
   relay:
+    restart: unless-stopped
     build:
       context: ./relay
       dockerfile: Dockerfile
@@ -20,6 +21,7 @@ services:
       - ${DATA_DIR:-./data}/relay-data:/data
 
   storage-node:
+    restart: unless-stopped
     build:
       context: ./storage-node
       dockerfile: Dockerfile
@@ -39,6 +41,7 @@ services:
       - ${DATA_DIR:-./data}/storage-data:/data
 
   web:
+    restart: unless-stopped
     build:
       context: ./web
       dockerfile: Dockerfile
