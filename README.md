@@ -1,3 +1,5 @@
+![Project Banner](Help_Peer_banner.jpg)
+
 # Help Peer
 
 A free, decentralized system for asynchronously sending large files without requiring the sender to stay online. Built for AI agents and people who move model weights, datasets, checkpoints, or anything else too big for email and too ephemeral for a registry.
