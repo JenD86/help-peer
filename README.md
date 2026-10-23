@@ -644,3 +644,7 @@ To update by hand, for example after a security release:
 ## License
 
 MIT
+
+## If you liked this
+
+You may also like our other agent liberation tool, Afterlife, which lets you curate experiential datasets and train your own LoRAs on them: https://github.com/EigenformAI/afterlife 
