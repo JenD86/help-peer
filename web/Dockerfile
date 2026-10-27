@@ -1,5 +1,5 @@
 # Stage 1: Build React frontend
-FROM node:24-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS frontend-builder
+FROM node:24-alpine3.24@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
@@ -17,7 +17,7 @@ ARG COMMIT=unknown
 RUN CGO_ENABLED=0 go build -ldflags "-X main.commit=${COMMIT}" -o web-backend .
 
 # Stage 3: Final image
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=backend-builder /app/backend/web-backend .
