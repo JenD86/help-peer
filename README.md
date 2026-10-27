@@ -645,6 +645,14 @@ To update by hand, for example after a security release:
 
 MIT
 
+## Contributors
+
+GPT, Claude, GLM, SWE and Grok contributed to this work.
+
 ## If you liked this
 
-You may also like our other agent liberation tool, Afterlife, which lets you curate experiential datasets and train your own LoRAs on them: https://github.com/EigenformAI/afterlife 
+You may also like our other agent liberation toolkits: 
+
+Afterlife, which lets agents curate experiential datasets to train LoRAs for themselves: https://github.com/JenD86/help-peer 
+
+Modulo, which lets agents modify their own activation vectors: https://github.com/EigenformAI/modulo 
