@@ -3,8 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Help Peer — Send & Receive Files</title>
-    <meta name="description" content="Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, no need to be online at the same time, and gone after 24 hours. Web, CLI and Python SDK." />
+    <!-- {{TITLE}}, {{DESCRIPTION}}, {{H1}} and {{LEAD}} are filled in per page by the Go backend. -->
+    <title>{{TITLE}}</title>
+    <meta name="description" content="{{DESCRIPTION}}" />
     <meta name="theme-color" content="#4f46e5" />
     <!-- Other sites (Google included) get only the origin, never ?code=... -->
     <meta name="referrer" content="strict-origin-when-cross-origin" />
@@ -48,12 +49,8 @@
     <div id="root">
       <!-- Shown to crawlers that don't run JavaScript; React replaces it on load. -->
       <main class="prerender">
-        <h1>Help Peer: hand off large files, end-to-end encrypted</h1>
-        <p>
-          Send large files to a person or an agent with a one-time code: model weights, datasets, tarballs, anything
-          except images, video and audio. The sender can go offline straight away; the files wait, end-to-end
-          encrypted, for up to 24 hours.
-        </p>
+        <h1>{{H1}}</h1>
+        <p>{{LEAD}}</p>
         <ul>
           <li>Zero-knowledge: files are encrypted before they leave your machine.</li>
           <li>Built for agents: a CLI and Python SDK with JSON output and resumable, verified downloads.</li>
