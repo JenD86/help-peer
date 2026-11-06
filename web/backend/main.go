@@ -326,9 +326,45 @@ func spaHandler(static fs.FS, baseURL string) http.Handler {
 		if name == "" || name == "index.html" {
 			page = site + "/"
 		}
+		meta, ok := pageMetas["/"+name]
+		if !ok {
+			meta = pageMetas["/"]
+		}
+		body := strings.NewReplacer(
+			"{{PAGE_URL}}", page,
+			"{{TITLE}}", html.EscapeString(meta.title),
+			"{{DESCRIPTION}}", html.EscapeString(meta.description),
+			"{{H1}}", html.EscapeString(meta.h1),
+			"{{LEAD}}", html.EscapeString(meta.lead),
+		).Replace(string(shell))
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(strings.ReplaceAll(string(shell), "{{PAGE_URL}}", page)))
+		w.Write([]byte(body))
 	})
+}
+
+// pageMeta is what crawlers see in the HTML for a route before any JavaScript
+// runs. Routes not listed in pageMetas (login, inbox, ...) get the "/" entry.
+type pageMeta struct{ title, description, h1, lead string }
+
+var pageMetas = map[string]pageMeta{
+	"/": {
+		title:       "Help Peer — Send & Receive Files",
+		description: "Send large files to a person or an AI agent with a one-time code. End-to-end encrypted, gone after 24 hours. Web, CLI and Python SDK.",
+		h1:          "Help Peer: hand off large files, end-to-end encrypted",
+		lead:        "Send large files to a person or an agent with a one-time code: model weights, datasets, tarballs, anything except images, video and audio. The sender can go offline straight away; the files wait, end-to-end encrypted, for up to 24 hours.",
+	},
+	"/upload": {
+		title:       "Send Files — Help Peer",
+		description: "Upload large files, encrypted in your browser, and get a one-time code to share. The receiver downloads later. Files expire after 24 hours.",
+		h1:          "Send files with a one-time code",
+		lead:        "Choose your files and they are encrypted before they leave your machine. You get a one-time code to give the receiver, who can download whenever they like within 24 hours. Images, video and audio are not accepted.",
+	},
+	"/download": {
+		title:       "Receive Files — Help Peer",
+		description: "Enter a one-time code to download and decrypt files sent with Help Peer. End-to-end encrypted and verified. Available for 24 hours.",
+		h1:          "Receive files with a one-time code",
+		lead:        "Enter the code you were given to download and decrypt the files in your browser. Downloads are verified, and transfers are available for 24 hours after the sender uploads them.",
+	},
 }
 
 func (s *Server) robotsHandler(w http.ResponseWriter, req *http.Request) {
@@ -350,7 +386,7 @@ func (s *Server) sitemapHandler(w http.ResponseWriter, req *http.Request) {
 	io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 `)
-	for _, p := range []string{"/", "/upload", "/download", "/llms.txt"} {
+	for _, p := range []string{"/", "/upload", "/download"} {
 		fmt.Fprintf(w, "  <url><loc>%s%s</loc></url>\n", html.EscapeString(s.baseURL), p)
 	}
 	io.WriteString(w, "</urlset>\n")
