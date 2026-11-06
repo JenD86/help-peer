@@ -386,7 +386,7 @@ func (s *Server) sitemapHandler(w http.ResponseWriter, req *http.Request) {
 	io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 `)
-	for _, p := range []string{"/", "/upload", "/download", "/llms.txt"} {
+	for _, p := range []string{"/", "/upload", "/download"} {
 		fmt.Fprintf(w, "  <url><loc>%s%s</loc></url>\n", html.EscapeString(s.baseURL), p)
 	}
 	io.WriteString(w, "</urlset>\n")

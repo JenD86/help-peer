@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -53,5 +55,24 @@ func TestSPAHandlerPerPageMeta(t *testing.T) {
 		pageMetas["/upload"].description == pageMetas["/"].description ||
 		pageMetas["/download"].description == pageMetas["/upload"].description {
 		t.Error("public pages share a title or description")
+	}
+}
+
+// llms.txt is a guide for agents, not a page for search results, so it stays
+// out of the sitemap (Search Console would list it as "not indexed" forever).
+func TestSitemapListsOnlyPublicPages(t *testing.T) {
+	e := newTestEnv(t)
+	resp, err := http.Get(e.srv.URL + "/sitemap.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	body := string(raw)
+	if n := strings.Count(body, "<loc>"); n != 3 {
+		t.Errorf("sitemap has %d URLs, want 3:\n%s", n, body)
+	}
+	if strings.Contains(body, "llms.txt") {
+		t.Errorf("sitemap lists llms.txt:\n%s", body)
 	}
 }
