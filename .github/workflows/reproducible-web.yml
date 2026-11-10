@@ -20,7 +20,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the frontend
         run: docker build --target frontend-builder -t web-frontend web
@@ -31,7 +31,7 @@ jobs:
           docker cp "$container:/app/backend/static" static
           (cd static && find . -type f | sort | xargs sha256sum) | tee sums.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sums-${{ matrix.arch }}
           path: sums.txt
@@ -40,7 +40,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
 
       - name: Compare the two builds
         run: |
