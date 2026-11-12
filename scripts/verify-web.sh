@@ -51,19 +51,29 @@ else
   status=1
 fi
 
-# 2. The page actually served. The backend fills these placeholders in with
-# its WEB_BASE_URL, which must be the URL given to this script.
-sed -e "s|{{SITE_URL}}|$site|g" -e "s|{{PAGE_URL}}|$site/|g" "$tmp/static/index.html" > "$tmp/expected.html"
-curl -fsS "$site/" -o "$tmp/served.html" || fail "could not fetch $site/"
-if cmp -s "$tmp/expected.html" "$tmp/served.html"; then
-  echo "OK    served index.html matches the build"
+# 2. The template the site serves, byte for byte. The backend fills the
+# placeholders in per page, so the rendered pages can't be compared directly.
+curl -fsS "$site/api/template" -o "$tmp/template.html" || fail "could not fetch $site/api/template"
+if cmp -s "$tmp/static/index.html" "$tmp/template.html"; then
+  echo "OK    served template matches the build"
 else
-  echo "FAIL  served index.html differs from the build:"
-  diff -u "$tmp/expected.html" "$tmp/served.html" | head -20 || true
+  echo "FAIL  served template differs from the build:"
+  diff -u "$tmp/static/index.html" "$tmp/template.html" | head -20 || true
   status=1
 fi
 
-# 3. The JS and CSS index.html loads. Browsers already refuse a file that
+# 3. Rendered pages must have every placeholder filled in.
+for page in / /upload /download; do
+  curl -fsS "$site$page" -o "$tmp/page.html" || fail "could not fetch $site$page"
+  if grep -q '{{' "$tmp/page.html"; then
+    echo "FAIL  $page still has unfilled placeholders"
+    status=1
+  else
+    echo "OK    $page has no unfilled placeholders"
+  fi
+done
+
+# 4. The JS and CSS index.html loads. Browsers already refuse a file that
 # doesn't match its integrity hash, but this shows the mismatch directly.
 for path in $(grep -o '/assets/[^"]*\.\(js\|css\)' "$tmp/static/index.html" | sort -u); do
   if curl -fsS "$site$path" -o "$tmp/asset" && cmp -s "$tmp/asset" "$tmp/static$path"; then

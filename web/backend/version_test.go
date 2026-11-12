@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"testing"
 )
@@ -26,5 +27,15 @@ func TestVersionReportsCommitAndTemplateHash(t *testing.T) {
 	sum := sha256.Sum256([]byte(template))
 	if out["commit"] != "abc123" || out["index_sha256"] != hex.EncodeToString(sum[:]) {
 		t.Fatalf("unexpected version: %v", out)
+	}
+
+	resp, err = http.Get(e.srv.URL + "/api/template")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != template {
+		t.Fatalf("template not served raw: %q", body)
 	}
 }

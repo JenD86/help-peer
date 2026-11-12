@@ -24,3 +24,15 @@ func (s *Server) versionHandler(w http.ResponseWriter, req *http.Request) {
 		"index_sha256": hex.EncodeToString(sum[:]),
 	})
 }
+
+// templateHandler serves index.html exactly as built, placeholders unfilled,
+// so scripts/verify-web.sh can compare it byte for byte with a fresh build.
+func (s *Server) templateHandler(w http.ResponseWriter, req *http.Request) {
+	shell, err := fs.ReadFile(s.static, "index.html")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "index.html not found")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(shell)
+}
