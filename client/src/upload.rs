@@ -15,6 +15,8 @@ pub struct UploadConfig {
     pub relay_url: String,
     /// Optional note for the recipients, carried in the encrypted manifest.
     pub message: Option<String>,
+    /// How many receivers may confirm the transfer (clamped to 1..=1000).
+    pub max_retrievals: usize,
 }
 
 /// Upload a file or directory to the network.
@@ -128,7 +130,15 @@ pub async fn upload_path(
     let encrypted_manifest = crypto::encrypt_segment(&k_data, &manifest_json);
     let url = format!("{}/manifest/{}", config.relay_url, relay_hash);
     let ack_hash = crypto::secret_hash(&manifest.ack_secret);
-    http::put(&client, &url, &encrypted_manifest, &[("X-Ack-Hash", &ack_hash)], "manifest upload").await?;
+    let max_retrievals = config.max_retrievals.clamp(1, 1000).to_string();
+    http::put(
+        &client,
+        &url,
+        &encrypted_manifest,
+        &[("X-Ack-Hash", &ack_hash), ("X-Max-Retrievals", &max_retrievals)],
+        "manifest upload",
+    )
+    .await?;
 
     Ok((code, relay_hash, manifest))
 }

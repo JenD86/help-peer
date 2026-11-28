@@ -131,9 +131,11 @@ def send(
 
         # Encrypt and upload manifest
         encrypted_manifest = crypto.encrypt_segment(k_data, manifest.to_json())
+        max_retrievals = min(max(len(recipients), 1), 1000)
         _upload_manifest(
             session, relay_url, r_hash, encrypted_manifest,
             crypto.secret_hash(manifest.ack_secret),
+            max_retrievals=max_retrievals,
         )
 
     # Tell the recipients. The upload already succeeded, so problems here are
@@ -487,11 +489,16 @@ def _streamed(data: bytes) -> io.BytesIO:
 
 def _upload_manifest(
     session: requests.Session, relay_url: str, r_hash: str, data: bytes, ack_hash: str,
+    *, max_retrievals: int = 1,
 ) -> None:
     """Upload encrypted manifest to relay."""
     resp = session.put(
         f"{relay_url}/manifest/{r_hash}", data=_streamed(data), timeout=TIMEOUT,
-        headers={"Content-Type": "application/octet-stream", "X-Ack-Hash": ack_hash},
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Ack-Hash": ack_hash,
+            "X-Max-Retrievals": str(max_retrievals),
+        },
     )
     if resp.status_code not in (200, 201):
         raise RuntimeError(f"manifest upload returned {resp.status_code}")

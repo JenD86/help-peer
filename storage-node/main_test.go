@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -300,5 +301,42 @@ func TestSignedRequestsVerify(t *testing.T) {
 	sig, _ := base64.RawURLEncoding.DecodeString(gotSig)
 	if !ed25519.Verify(pub, gotBody, sig) || r.Action != "register" || r.Timestamp == 0 {
 		t.Fatalf("bad signed request %s", gotBody)
+	}
+}
+
+func TestConcurrentPutSameShard(t *testing.T) {
+	_, store, base := newTestNode(t, 1<<20)
+	data := bytes.Repeat([]byte("concurrent-shard-"), 32)
+	h := hashOf(data)
+
+	var wg sync.WaitGroup
+	errs := make(chan int, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			code := put(t, base+"/shard/"+h, data)
+			if code != 201 && code != 200 {
+				errs <- code
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for code := range errs {
+		t.Fatalf("concurrent put failed with status %d", code)
+	}
+
+	if got := store.UsedBytes(); got != int64(len(data)) {
+		t.Fatalf("usedBytes = %d, want %d", got, len(data))
+	}
+	resp, err := http.Get(base + "/shard/" + h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Equal(got, data) {
+		t.Fatalf("shard corrupted after concurrent puts")
 	}
 }

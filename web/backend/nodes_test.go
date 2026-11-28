@@ -500,3 +500,61 @@ func TestConfigNodesKeepsCLISpreadSafe(t *testing.T) {
 		t.Fatalf("expected static + 6 networks, got %d: %v", len(got), got)
 	}
 }
+
+func TestHeartbeatsNotRateLimited(t *testing.T) {
+	v := newVolunteer(t)
+	e := newNodeEnv(t, nil)
+	e.s.nodeRegistrations = newRateLimiter("node-registrations", 2, time.Hour)
+
+	if code, msg := e.register(t, v, 1<<30); code != 200 {
+		t.Fatalf("initial registration failed: %d %s", code, msg)
+	}
+	// Routine heartbeats from an active node must not consume the registration limit.
+	for i := 0; i < 10; i++ {
+		if code, msg := e.register(t, v, 1<<30); code != 200 {
+			t.Fatalf("heartbeat %d rate-limited: %d %s", i, code, msg)
+		}
+	}
+	// New nodes from the same IP are still rate-limited.
+	v2, v3 := newVolunteer(t), newVolunteer(t)
+	if code, msg := e.register(t, v2, 1<<30); code != 200 {
+		t.Fatalf("second new node failed: %d %s", code, msg)
+	}
+	if code, _ := e.register(t, v3, 1<<30); code != 429 {
+		t.Fatalf("third new node expected 429, got %d", code)
+	}
+}
+
+func TestCancelPurgesPendingAudits(t *testing.T) {
+	v := newVolunteer(t)
+	e := newNodeEnv(t, nil)
+	e.s.nodes.sample = func() bool { return true }
+	e.register(t, v, 1<<30)
+
+	up, _ := uploadSegment(t, e)
+	var mine []shardRef
+	for _, sh := range up.Shards {
+		if sh.Node == v.srv.URL {
+			mine = append(mine, shardRef{NodeID: v.id, Hash: sh.Hash})
+			// Simulate the shard having been deleted by a cancel.
+			v.mu.Lock()
+			delete(v.shards, sh.Hash)
+			v.mu.Unlock()
+		}
+	}
+	if len(mine) == 0 {
+		t.Fatal("no shards placed on volunteer")
+	}
+
+	e.s.nodes.CancelAudits(mine)
+	e.s.nodes.mu.Lock()
+	for i := range e.s.nodes.audits {
+		e.s.nodes.audits[i].Due = time.Now()
+	}
+	e.s.nodes.mu.Unlock()
+	e.s.nodes.runDueAudits()
+
+	if n := e.s.nodes.nodes[v.id]; n.AuditsFailed != 0 {
+		t.Fatalf("honest node penalised for cancelled shards: %+v", n)
+	}
+}

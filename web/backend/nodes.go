@@ -423,6 +423,34 @@ func (r *nodeRegistry) RecordAudit(id string, ok bool) {
 	r.saveLocked()
 }
 
+// shardRef identifies a specific shard stored on a specific volunteer node.
+type shardRef struct {
+	NodeID string
+	Hash   string
+}
+
+// CancelAudits removes pending spot-check audits for shards that were
+// legitimately deleted (e.g. when a transfer is cancelled), so honest
+// volunteer nodes aren't penalized for honoring DELETE.
+func (r *nodeRegistry) CancelAudits(shards []shardRef) {
+	if len(shards) == 0 {
+		return
+	}
+	drop := make(map[shardRef]struct{}, len(shards))
+	for _, s := range shards {
+		drop[s] = struct{}{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kept := r.audits[:0]
+	for _, t := range r.audits {
+		if _, ok := drop[shardRef{NodeID: t.NodeID, Hash: t.Hash}]; !ok {
+			kept = append(kept, t)
+		}
+	}
+	r.audits = kept
+}
+
 // runDueAudits fetches back the spot-check shards that are due.
 func (r *nodeRegistry) runDueAudits() {
 	now := time.Now()
@@ -559,7 +587,9 @@ func regErr(status int, format string, args ...interface{}) error {
 // Register handles a signed registration or heartbeat. A node's first
 // registration (or a change of URL) proves that the URL serves this node's
 // key and really stores data; heartbeats just refresh its free space.
-func (r *nodeRegistry) Register(req nodeRequest) error {
+// allowNew, if non-nil, is called only when a node requires verification
+// (new, inactive, or URL changed), so routine heartbeats aren't throttled.
+func (r *nodeRegistry) Register(req nodeRequest, allowNew func() bool) error {
 	nodeURL, parsed, err := canonicalNodeURL(req.URL)
 	if err != nil {
 		return regErr(http.StatusBadRequest, "%v", err)
@@ -583,6 +613,9 @@ func (r *nodeRegistry) Register(req nodeRequest) error {
 	r.mu.Unlock()
 
 	if needsCheck {
+		if allowNew != nil && !allowNew() {
+			return regErr(http.StatusTooManyRequests, "too many registrations, try again later")
+		}
 		network, err = r.checkNewNode(nodeURL, parsed.Hostname(), req.NodeID)
 		if err != nil {
 			return err
@@ -881,13 +914,10 @@ func (s *Server) nodeRegisterHandler(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
-	// A brand-new registration triggers a storage test, so don't let one
-	// client trigger lots of them.
-	if !s.nodeRegistrations.Allow(clientIP(req), 1) {
-		writeError(w, http.StatusTooManyRequests, "too many registrations, try again later")
-		return
-	}
-	if err := s.nodes.Register(r); err != nil {
+	// A brand-new registration triggers a storage test, so rate-limit those
+	// without throttling routine heartbeats from already-active nodes.
+	ip := clientIP(req)
+	if err := s.nodes.Register(r, func() bool { return s.nodeRegistrations.Allow(ip, 1) }); err != nil {
 		writeRegistryError(w, err)
 		return
 	}

@@ -236,7 +236,12 @@ async fn main() {
             out.say(&format!("Storage nodes: {} (total)", storage_nodes.len()));
             out.say("");
 
-            let config = upload::UploadConfig { storage_nodes, relay_url: relay, message: message.clone() };
+            let config = upload::UploadConfig {
+                storage_nodes,
+                relay_url: relay,
+                message: message.clone(),
+                max_retrievals: recipients.len().max(1),
+            };
             let (code, relay_hash, manifest) = match upload::upload_path(path, name, &config).await {
                 Ok(r) => r,
                 Err(e) => out.fail("Upload", e),

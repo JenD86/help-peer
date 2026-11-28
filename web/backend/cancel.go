@@ -92,28 +92,46 @@ func (s *Server) cancelHandler(w http.ResponseWriter, req *http.Request) {
 		tokenFor = func(shardHash string) string { return hex.EncodeToString(shardToken(key, shardHash)) }
 	}
 
-	var mu sync.Mutex
-	counts := map[string]int{}
-	sem := make(chan struct{}, 16)
-	var wg sync.WaitGroup
+	var cancelledAudits []shardRef
+	type deleteTarget struct {
+		client *http.Client
+		url    string
+		token  string
+	}
+	var targets []deleteTarget
+	failed := 0
 	for _, sh := range body.Shards {
 		nodeURL, key, ok := s.nodes.InternalURL(sh.Node)
 		if !ok || !isHexHash(sh.Hash) {
-			mu.Lock() // workers update counts concurrently
-			counts["failed"]++
-			mu.Unlock()
+			failed++
 			continue
 		}
+		if isDynamic(key) {
+			cancelledAudits = append(cancelledAudits, shardRef{NodeID: key, Hash: sh.Hash})
+		}
+		targets = append(targets, deleteTarget{
+			client: s.nodes.ClientFor(key),
+			url:    nodeURL + "/shard/" + sh.Hash,
+			token:  tokenFor(sh.Hash),
+		})
+	}
+	s.nodes.CancelAudits(cancelledAudits)
+
+	var mu sync.Mutex
+	counts := map[string]int{"failed": failed}
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
+	for _, t := range targets {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(client *http.Client, url, token string) {
+		go func(t deleteTarget) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			outcome := deleteShard(client, url, token)
+			outcome := deleteShard(t.client, t.url, t.token)
 			mu.Lock()
 			counts[outcome]++
 			mu.Unlock()
-		}(s.nodes.ClientFor(key), nodeURL+"/shard/"+sh.Hash, tokenFor(sh.Hash))
+		}(t)
 	}
 	wg.Wait()
 
