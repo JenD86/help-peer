@@ -622,3 +622,21 @@ class TestSlowUploads:
             assert shard.node == node
         finally:
             server.shutdown()
+
+
+class TestMultiRecipientRetrievals:
+    def test_upload_manifest_sends_max_retrievals(self, monkeypatch):
+        seen_headers = {}
+
+        class FakeResp:
+            status_code = 201
+
+        class FakeSession:
+            def put(self, url, data=None, timeout=None, headers=None):
+                seen_headers.update(headers or {})
+                return FakeResp()
+
+        client._upload_manifest(FakeSession(), "http://relay", "a" * 64, b"enc", "b" * 64, max_retrievals=3)
+        assert seen_headers["X-Max-Retrievals"] == "3"
+        assert seen_headers["X-Ack-Hash"] == "b" * 64
+

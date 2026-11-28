@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -154,6 +155,10 @@ func main() {
 		addr, backend, capacityBytes, ttlSeconds)
 
 	srv := &http.Server{Addr: addr, Handler: node.routes()}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Auto-register with a web backend if configured. The backend checks
 	// that the public URL really serves this node, so it must be the
@@ -179,7 +184,7 @@ func main() {
 		srv.Shutdown(context.Background())
 	}()
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }

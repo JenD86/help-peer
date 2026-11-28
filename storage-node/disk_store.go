@@ -42,16 +42,17 @@ func (d *DiskStore) Put(hash string, data io.Reader, ttl time.Duration, deleteTo
 		return info.Size(), d.Touch(hash, ttl)
 	}
 
-	// Atomic write: write to temp file then rename
+	// Atomic write: write to a unique temp file then rename so concurrent
+	// uploads of the same shard don't clobber each other.
 	if err := os.MkdirAll(filepath.Dir(shardPath), 0755); err != nil {
 		return 0, err
 	}
 
-	tmpPath := shardPath + ".tmp"
-	tmpFile, err := os.Create(tmpPath)
+	tmpFile, err := os.CreateTemp(filepath.Dir(shardPath), hash+".*.tmp")
 	if err != nil {
 		return 0, err
 	}
+	tmpPath := tmpFile.Name()
 
 	written, err := io.Copy(tmpFile, data)
 	tmpFile.Close()
@@ -61,9 +62,22 @@ func (d *DiskStore) Put(hash string, data io.Reader, ttl time.Duration, deleteTo
 	}
 
 	// The delete-token hash lives in a sidecar file, written before the
-	// shard appears so a visible shard always has its token.
+	// shard appears so a visible shard always has its token. O_EXCL keeps
+	// the first uploader's token if two uploads of the same shard race.
 	if deleteTokenHash != "" {
-		if err := os.WriteFile(shardPath+deleteTokenSuffix, []byte(deleteTokenHash), 0644); err != nil {
+		f, err := os.OpenFile(shardPath+deleteTokenSuffix, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err == nil {
+			_, werr := f.WriteString(deleteTokenHash)
+			cerr := f.Close()
+			if werr != nil || cerr != nil {
+				os.Remove(tmpPath)
+				os.Remove(shardPath + deleteTokenSuffix)
+				if werr != nil {
+					return 0, werr
+				}
+				return 0, cerr
+			}
+		} else if !os.IsExist(err) {
 			os.Remove(tmpPath)
 			return 0, err
 		}
@@ -71,12 +85,13 @@ func (d *DiskStore) Put(hash string, data io.Reader, ttl time.Duration, deleteTo
 
 	if err := os.Rename(tmpPath, shardPath); err != nil {
 		os.Remove(tmpPath)
-		os.Remove(shardPath + deleteTokenSuffix)
 		return 0, err
 	}
 
 	d.mu.Lock()
-	d.usedBytes += written
+	if _, existed := d.shardIndex[hash]; !existed {
+		d.usedBytes += written
+	}
 	d.shardIndex[hash] = time.Now().Add(ttl)
 	d.mu.Unlock()
 

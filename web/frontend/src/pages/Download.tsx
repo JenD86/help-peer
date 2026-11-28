@@ -32,6 +32,7 @@ interface Manifest {
 interface FileWritable {
   write(data: ArrayBuffer): Promise<void>
   close(): Promise<void>
+  abort(): Promise<void>
 }
 interface DirHandle {
   getDirectoryHandle(name: string, opts: { create: boolean }): Promise<DirHandle>
@@ -169,38 +170,44 @@ export default function Download() {
           writable = await (await d.getFileHandle(parts[parts.length - 1], { create: true })).createWritable()
         }
 
-        for (let si = 0; si < file.segments.length; si++) {
-          const seg = file.segments[si]
-          setProgress(`Downloading ${file.path} — ${Math.floor((doneBytes / total) * 100)}% overall`)
+        try {
+          for (let si = 0; si < file.segments.length; si++) {
+            const seg = file.segments[si]
+            setProgress(`Downloading ${file.path} — ${Math.floor((doneBytes / total) * 100)}% overall`)
 
-          const encrypted = await downloadSegment(
-            seg.shards,
-            seg.encrypted_size,
-            manifest.erasure_data_shards,
-            manifest.erasure_parity_shards
-          )
-          const plaintext = await decryptSegment(kData, encrypted)
-          hasher.update(plaintext)
-          if (writable) await writable.write(plaintext)
-          else chunks.push(plaintext)
-          doneBytes += plaintext.byteLength
-        }
+            const encrypted = await downloadSegment(
+              seg.shards,
+              seg.encrypted_size,
+              manifest.erasure_data_shards,
+              manifest.erasure_parity_shards
+            )
+            const plaintext = await decryptSegment(kData, encrypted)
+            hasher.update(plaintext)
+            if (writable) await writable.write(plaintext)
+            else chunks.push(plaintext)
+            doneBytes += plaintext.byteLength
+          }
 
-        if (file.blake3 && hasher.hexdigest() !== file.blake3) {
-          throw new Error(`${file.path} is corrupt (BLAKE3 mismatch)`)
-        }
+          if (file.blake3 && hasher.hexdigest() !== file.blake3) {
+            throw new Error(`${file.path} is corrupt (BLAKE3 mismatch)`)
+          }
 
-        if (writable) {
-          await writable.close()
-        } else {
-          // Fallback: hand the assembled file to the browser's download manager
-          const url = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }))
-          const a = document.createElement('a')
-          a.href = url
-          a.download = parts.join('_')
-          a.click()
-          // Revoking immediately can cancel the download in some browsers
-          setTimeout(() => URL.revokeObjectURL(url), 60_000)
+          if (writable) {
+            await writable.close()
+            writable = null
+          } else {
+            // Fallback: hand the assembled file to the browser's download manager
+            const url = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }))
+            const a = document.createElement('a')
+            a.href = url
+            a.download = parts.join('_')
+            a.click()
+            // Revoking immediately can cancel the download in some browsers
+            setTimeout(() => URL.revokeObjectURL(url), 60_000)
+          }
+        } catch (err) {
+          if (writable) await writable.abort().catch(() => {})
+          throw err
         }
         downloaded.push(file.path)
       }

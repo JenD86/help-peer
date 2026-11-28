@@ -86,6 +86,7 @@ export default function Upload() {
   const [cancelInfo, setCancelInfo] = useState<CancelInfo | null>(null)
   const [cancelState, setCancelState] = useState<'idle' | 'cancelling' | 'cancelled' | 'error'>('idle')
   const [cancelMsg, setCancelMsg] = useState('')
+  const [notifyWarnings, setNotifyWarnings] = useState<string[]>([])
   const [errorMsg, setErrorMsg] = useState('')
   const [mediaWarning, setMediaWarning] = useState('')
 
@@ -136,6 +137,7 @@ export default function Upload() {
     setStatus('encrypting')
     setProgress('Generating transfer code...')
     setErrorMsg('')
+    setNotifyWarnings([])
 
     let ticket = ''
     try {
@@ -254,11 +256,19 @@ export default function Upload() {
       })
       setCancelState('idle')
 
-      // Notify recipients if provided
+      // Notify recipients if provided. The upload already succeeded, so a
+      // failure here is shown as a warning rather than hiding the code.
       if (recipientList.length > 0 && transfer_id) {
         setStatus('notifying')
         setProgress(`Sending notifications to ${recipientList.length} recipient(s)...`)
-        await notifyRecipients(transfer_id, rHash, code, recipientList)
+        try {
+          const notified = await notifyRecipients(transfer_id, rHash, code, recipientList)
+          if (notified.errors && notified.errors.length > 0) {
+            setNotifyWarnings(notified.errors)
+          }
+        } catch (err: any) {
+          setNotifyWarnings([`Could not notify recipients (${err?.message || 'request failed'}); share the code yourself.`])
+        }
       }
 
       setStatus('done')
@@ -305,6 +315,13 @@ export default function Upload() {
         <div className="text-sm text-gray-500 mb-4">
           {result.files} file(s) · {formatBytes(result.totalBytes)}
         </div>
+        {notifyWarnings.length > 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800 mb-4 text-left space-y-1">
+            {notifyWarnings.map((w, i) => (
+              <div key={i}>{w}</div>
+            ))}
+          </div>
+        )}
         {cancelMsg && (
           <p className={`text-sm mb-4 ${cancelState === 'error' ? 'text-red-600' : 'text-gray-600'}`}>{cancelMsg}</p>
         )}
@@ -324,6 +341,7 @@ export default function Upload() {
               setResult(null)
               setCancelInfo(null)
               setCancelMsg('')
+              setNotifyWarnings([])
               setFiles([])
               setRecipients('')
               setMessage('')
